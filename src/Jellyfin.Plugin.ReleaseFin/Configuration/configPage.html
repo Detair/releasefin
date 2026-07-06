@@ -76,7 +76,7 @@
         function esc(s) {
             var d = document.createElement('div');
             d.textContent = s == null ? '' : s;
-            return d.innerHTML;
+            return d.innerHTML.replace(/"/g, '&quot;');
         }
 
         function presetToCron() {
@@ -168,6 +168,9 @@
                 page.querySelector('#rfScheduleList').innerHTML = html;
                 page._schedules = schedules;
                 Dashboard.hideLoadingMsg();
+            }).catch(function () {
+                Dashboard.hideLoadingMsg();
+                page.querySelector('#rfScheduleList').innerHTML = '<p>Failed to load schedules.</p>';
             });
         }
 
@@ -240,7 +243,7 @@
             }).then(function () { hideForm(); loadList(); })
               .catch(function (xhr) {
                   (xhr.text ? xhr.text() : Promise.resolve('Save failed.'))
-                      .then(function (t) { Dashboard.alert(t || 'Save failed.'); });
+                      .then(function (t) { Dashboard.alert((t || '').replace(/^"|"$/g, '') || 'Save failed.'); });
               });
         });
     })();
