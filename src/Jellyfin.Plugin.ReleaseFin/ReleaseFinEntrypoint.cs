@@ -58,42 +58,49 @@ public sealed class ReleaseFinEntrypoint(
         }
 
         var changed = false;
-        foreach (var schedule in plugin.Configuration.Schedules)
+        try
         {
-            try
+            foreach (var schedule in plugin.Configuration.Schedules)
             {
-                var now = DateTime.UtcNow;
-                if (!schedule.Enabled || !ScheduleCalculator.IsValid(schedule.CronExpression))
+                try
                 {
-                    continue;
-                }
+                    var now = DateTime.UtcNow;
+                    if (!schedule.Enabled || !ScheduleCalculator.IsValid(schedule.CronExpression))
+                    {
+                        continue;
+                    }
 
-                var due = ScheduleCalculator.CountDueTicks(
-                    schedule.CronExpression, schedule.LastRunUtc, now, TimeZoneInfo.Local);
-                if (due == 0)
+                    var due = ScheduleCalculator.CountDueTicks(
+                        schedule.CronExpression, schedule.LastRunUtc, now, TimeZoneInfo.Local);
+                    if (due == 0)
+                    {
+                        continue;
+                    }
+
+                    await releaseManager
+                        .ReleaseNextAsync(schedule, due * schedule.EpisodesPerTick, ct)
+                        .ConfigureAwait(false);
+                    schedule.LastRunUtc = now;
+                    changed = true;
+                }
+                catch (OperationCanceledException)
                 {
-                    continue;
+                    throw;
                 }
-
-                await releaseManager
-                    .ReleaseNextAsync(schedule, due * schedule.EpisodesPerTick, ct)
-                    .ConfigureAwait(false);
-                schedule.LastRunUtc = now;
-                changed = true;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "ReleaseFin: tick failed for schedule {Name}", schedule.Name);
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "ReleaseFin: tick failed for schedule {Name}", schedule.Name);
+                }
             }
         }
-
-        if (changed)
+        finally
         {
-            plugin.SaveConfiguration();
+            // Persist on every exit path (incl. shutdown cancellation mid-loop) so already-released
+            // ticks never re-fire after a restart (double release).
+            if (changed)
+            {
+                plugin.SaveConfiguration();
+            }
         }
     }
 

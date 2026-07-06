@@ -111,8 +111,11 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>A newly imported episode arrives locked unless it sorts at or before the released
-    /// frontier (the highest untagged, orderable, non-special episode).</summary>
+    /// <summary>A newly imported episode arrives locked unless it sorts strictly before the first
+    /// still-tagged episode (back-fill inside the released prefix). Anti-binge-safe: other
+    /// just-imported, not-yet-tagged episodes never widen the visible region, and when no tagged
+    /// episode exists (drip caught up) the new episode is always locked — a back-filled old episode
+    /// then self-heals on the next tick.</summary>
     public async Task LockNewEpisodeAsync(ReleaseSchedule schedule, Episode newEpisode, CancellationToken ct)
     {
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
@@ -125,25 +128,29 @@ public class ReleaseManager(
             }
 
             var tag = ReleaseFinTag.For(schedule.Id);
-            EpisodeKey? frontier = null;
+            EpisodeKey? firstTagged = null;
             foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
             {
                 if (episode.Id != newEpisode.Id
-                    && !episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+                    && episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
                 {
-                    frontier = key; // ordered ascending => ends at the highest released key
+                    firstTagged = key; // ordered ascending => first hit is the lowest tagged key
+                    break;
                 }
             }
 
-            if (frontier is { } f && newKey.IsAtOrBefore(f))
+            if (firstTagged is { } f && newKey.CompareTo(f) < 0)
             {
-                return; // back-fill inside the already-released region stays visible
+                return; // back-fill inside the already-released prefix stays visible
             }
 
-            await SetTagAsync(newEpisode, tag, present: true, ct).ConfigureAwait(false);
-            logger.LogInformation(
-                "ReleaseFin: locked new episode S{Season}E{Episode} for schedule {Name}",
-                newKey.Season, newKey.Episode, schedule.Name);
+            var wrote = await SetTagAsync(newEpisode, tag, present: true, ct).ConfigureAwait(false);
+            if (wrote)
+            {
+                logger.LogInformation(
+                    "ReleaseFin: locked new episode S{Season}E{Episode} for schedule {Name}",
+                    newKey.Season, newKey.Episode, schedule.Name);
+            }
         }
         finally
         {
@@ -151,7 +158,7 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>(released, total) drip-eligible episodes; also flags an orphaned (empty) series.</summary>
+    /// <summary>(released, total) counts of drip-eligible episodes for the schedule's series.</summary>
     public (int Released, int Total) GetProgress(ReleaseSchedule schedule)
     {
         var tag = ReleaseFinTag.For(schedule.Id);
@@ -176,7 +183,8 @@ public class ReleaseManager(
         .OrderBy(t => t.Key)
         .Select(t => (t.Episode, t.Key));
 
-    private async Task SetTagAsync(Episode episode, string tag, bool present, CancellationToken ct)
+    /// <summary>Returns true when a metadata write actually happened.</summary>
+    private async Task<bool> SetTagAsync(Episode episode, string tag, bool present, CancellationToken ct)
     {
         var updated = present
             ? ReleaseFinTag.Add(episode.Tags, tag)
@@ -185,7 +193,7 @@ public class ReleaseManager(
         {
             if (present == episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
             {
-                return; // already in desired state; skip a pointless metadata write
+                return false; // already in desired state; skip a pointless metadata write
             }
         }
 
@@ -193,6 +201,7 @@ public class ReleaseManager(
         await libraryManager
             .UpdateItemAsync(episode, episode.GetParent(), ItemUpdateType.MetadataEdit, ct)
             .ConfigureAwait(false);
+        return true;
     }
 
     private async Task SetUserBlockAsync(Guid[] userIds, string tag, bool blocked)
