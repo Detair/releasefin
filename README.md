@@ -65,6 +65,8 @@ Cron expressions are evaluated in the Jellyfin *server's* local time zone. Check
 **The schedule list says "ORPHANED (series deleted)".**
 The series was removed from the library. The schedule no longer does anything useful; delete it to clean up the blocked-tag entries.
 
+**Known limitation:** if every user assigned to a schedule is deleted from Jellyfin, the schedule still shows "Active" and keeps releasing on its cadence (harmless — with no blocked users the episodes are visible to everyone anyway). Delete or edit the schedule to tidy up.
+
 ## Development
 
 ```
