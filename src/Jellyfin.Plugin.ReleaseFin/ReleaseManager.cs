@@ -29,6 +29,10 @@ public class ReleaseManager(
                 ? new EpisodeKey(s, e)
                 : null;
 
+            // The import-classification frontier starts at the initial offset (null when no offset).
+            schedule.ReleasedUpToSeason = offset?.Season;
+            schedule.ReleasedUpToEpisode = offset?.Episode;
+
             foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
             {
                 if (offset is { } o && key.IsAtOrBefore(o))
@@ -57,7 +61,7 @@ public class ReleaseManager(
             var tag = ReleaseFinTag.For(schedule.Id);
             var released = 0;
 
-            foreach (var (episode, _) in GetOrderedEpisodes(schedule.SeriesId))
+            foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
             {
                 if (released >= count)
                 {
@@ -71,6 +75,14 @@ public class ReleaseManager(
 
                 await SetTagAsync(episode, tag, present: false, ct).ConfigureAwait(false);
                 released++;
+
+                // Advance the persisted import-classification frontier past this episode.
+                var frontier = GetFrontier(schedule);
+                if (frontier is not { } f || key.CompareTo(f) > 0)
+                {
+                    schedule.ReleasedUpToSeason = key.Season;
+                    schedule.ReleasedUpToEpisode = key.Episode;
+                }
             }
 
             if (released > 0)
@@ -111,11 +123,10 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>A newly imported episode arrives locked unless it sorts strictly before the first
-    /// still-tagged episode (back-fill inside the released prefix). Anti-binge-safe: other
-    /// just-imported, not-yet-tagged episodes never widen the visible region, and when no tagged
-    /// episode exists (drip caught up) the new episode is always locked — a back-filled old episode
-    /// then self-heals on the next tick.</summary>
+    /// <summary>A newly imported episode arrives locked unless it sorts at or before the schedule's
+    /// persisted release frontier (back-fill inside the released region). Classification never
+    /// reads churning tag state, so multi-episode imports are fully order-independent; with no
+    /// frontier (nothing released yet) the new episode is always locked — anti-binge-safe.</summary>
     public async Task LockNewEpisodeAsync(ReleaseSchedule schedule, Episode newEpisode, CancellationToken ct)
     {
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
@@ -127,23 +138,12 @@ public class ReleaseManager(
                 return;
             }
 
+            if (GetFrontier(schedule) is { } f && newKey.IsAtOrBefore(f))
+            {
+                return; // back-fill inside the already-released region stays visible
+            }
+
             var tag = ReleaseFinTag.For(schedule.Id);
-            EpisodeKey? firstTagged = null;
-            foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
-            {
-                if (episode.Id != newEpisode.Id
-                    && episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
-                {
-                    firstTagged = key; // ordered ascending => first hit is the lowest tagged key
-                    break;
-                }
-            }
-
-            if (firstTagged is { } f && newKey.CompareTo(f) < 0)
-            {
-                return; // back-fill inside the already-released prefix stays visible
-            }
-
             var wrote = await SetTagAsync(newEpisode, tag, present: true, ct).ConfigureAwait(false);
             if (wrote)
             {
@@ -166,6 +166,12 @@ public class ReleaseManager(
         var locked = episodes.Count(p => p.Episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase));
         return (episodes.Count - locked, episodes.Count);
     }
+
+    /// <summary>The schedule's persisted release high-water mark, or null when nothing released yet.</summary>
+    private static EpisodeKey? GetFrontier(ReleaseSchedule schedule) =>
+        schedule.ReleasedUpToSeason is int s && schedule.ReleasedUpToEpisode is int e
+            ? new EpisodeKey(s, e)
+            : null;
 
     /// <summary>Drip-eligible episodes of the series in aired order (orderable, non-special).</summary>
     private IEnumerable<(Episode Episode, EpisodeKey Key)> GetOrderedEpisodes(Guid seriesId) =>

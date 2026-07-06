@@ -118,6 +118,7 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         }
 
         await releaseManager.ReleaseNextAsync(existing, existing.EpisodesPerTick, ct).ConfigureAwait(false);
+        Plugin.Instance!.SaveConfiguration(); // persist the advanced release frontier
         return Ok(ToDto(existing));
     }
 

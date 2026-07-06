@@ -23,6 +23,12 @@ public class ReleaseSchedule
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>Highest episode ever released for this schedule (persisted high-water mark);
+    /// classifies new imports. Null = nothing released yet.</summary>
+    public int? ReleasedUpToSeason { get; set; }
+
+    public int? ReleasedUpToEpisode { get; set; }
+
     /// <summary>Last time the scheduler evaluated this schedule; cron occurrences after this are due.</summary>
     public DateTime LastRunUtc { get; set; } = DateTime.UtcNow;
 }
