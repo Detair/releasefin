@@ -1,0 +1,8 @@
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.10.7
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./config:/config
+      - ./media:/media
