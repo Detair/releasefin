@@ -821,6 +821,14 @@ Note for the implementer: if `GetUserById`, `GetPreference` nullability, or `Pre
 2. `TickAsync` must persist progress even when a later schedule throws or shutdown cancels mid-loop: wrap the schedule loop in `try { ... } finally { if (changed) plugin.SaveConfiguration(); }`.
 3. Only log "locked new episode" when a write actually happened, and fix the `GetProgress` doc comment (it returns counts; it does not flag orphans).
 
+**AMENDMENT 2 (supersedes amendment 1's frontier rule):** the tag-derived firstTagged rule is still order-dependent when nothing is tagged (caught-up drip + season pack processed out of order: the first-processed episode gets tagged, its siblings then read as back-fill against it and leak). Classification of NEW imports must not depend on churning tag state. Fix:
+- Add a persisted high-water mark to `ReleaseSchedule`: `public int? ReleasedUpToSeason { get; set; }` / `public int? ReleasedUpToEpisode { get; set; }`.
+- `ApplyAsync` initializes it from `InitialSeason`/`InitialEpisode` (null when no offset).
+- `ReleaseNextAsync` advances it past each episode it untags (max of current frontier and the released key).
+- `LockNewEpisodeAsync` becomes trivial and order-independent: tag the new episode iff the frontier is null OR `newKey` sorts after the frontier; no tag scanning.
+- Persistence: the entrypoint already saves config after due ticks; `ReleaseNow` in the controller must also call `Plugin.Instance!.SaveConfiguration()` after `ReleaseNextAsync`.
+- The "release pointer is derived, not stored" principle still governs WHICH episode releases next (tag scan); the stored frontier only classifies new imports. Manual admin untagging still works; it simply doesn't advance the import frontier — safe direction (locks, never leaks).
+
 - [ ] **Step 2: Implement the service registrator**
 
 `src/Jellyfin.Plugin.ReleaseFin/PluginServiceRegistrator.cs`:
