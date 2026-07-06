@@ -73,6 +73,12 @@
         var page = document.querySelector('#ReleaseFinConfigPage');
         var url = function (path) { return ApiClient.getUrl('ReleaseFin/' + path); };
 
+        function esc(s) {
+            var d = document.createElement('div');
+            d.textContent = s == null ? '' : s;
+            return d.innerHTML;
+        }
+
         function presetToCron() {
             var preset = page.querySelector('#rfPreset').value;
             if (preset === 'cron') return page.querySelector('#rfCron').value.trim();
@@ -133,10 +139,10 @@
             ]).then(function (results) {
                 page.querySelector('#rfUsers').innerHTML = results[0].map(function (u) {
                     return '<label class="checkboxContainer"><input is="emby-checkbox" type="checkbox" ' +
-                        'class="rfUser" value="' + u.Id + '"/><span>' + u.Name + '</span></label>';
+                        'class="rfUser" value="' + esc(u.Id) + '"/><span>' + esc(u.Name) + '</span></label>';
                 }).join('');
                 page.querySelector('#rfSeries').innerHTML = results[1].Items.map(function (s) {
-                    return '<option value="' + s.Id + '">' + s.Name + '</option>';
+                    return '<option value="' + esc(s.Id) + '">' + esc(s.Name) + '</option>';
                 }).join('');
             });
         }
@@ -151,7 +157,7 @@
                         var status = s.Orphaned ? 'ORPHANED (series deleted)'
                             : !s.Enabled ? 'Disabled'
                             : s.Released >= s.Total ? 'Complete' : 'Active';
-                        return '<tr><td>' + s.Name + '</td><td>' + s.SeriesName + '</td>' +
+                        return '<tr><td>' + esc(s.Name) + '</td><td>' + esc(s.SeriesName) + '</td>' +
                             '<td>' + s.Released + '/' + s.Total + ' released</td>' +
                             '<td>' + (s.NextRunUtc ? new Date(s.NextRunUtc + (s.NextRunUtc.endsWith('Z') ? '' : 'Z')).toLocaleString() : '—') + '</td>' +
                             '<td>' + status + '</td>' +
@@ -172,7 +178,7 @@
             page.querySelector('#rfName').value = schedule ? schedule.Name : '';
             page.querySelector('#rfPerTick').value = schedule ? schedule.EpisodesPerTick : 1;
             page.querySelector('#rfEnabled').checked = schedule ? schedule.Enabled : true;
-            page.querySelector('#rfOffset').value = schedule && schedule.InitialSeason !== null
+            page.querySelector('#rfOffset').value = schedule && schedule.InitialSeason != null && schedule.InitialEpisode != null
                 ? 'S' + ('0' + schedule.InitialSeason).slice(-2) + 'E' + ('0' + schedule.InitialEpisode).slice(-2) : '';
             if (schedule) page.querySelector('#rfSeries').value = schedule.SeriesId;
             Array.prototype.forEach.call(page.querySelectorAll('.rfUser'), function (cb) {

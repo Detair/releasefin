@@ -46,6 +46,8 @@ public class ScheduleDto
 public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager libraryManager)
     : ControllerBase
 {
+    private static readonly object ConfigLock = new();
+
     [HttpGet("Schedules")]
     public ActionResult<IEnumerable<ScheduleDto>> GetSchedules() =>
         Ok(Config.Schedules.Select(ToDto));
@@ -62,8 +64,12 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         schedule.Id = Guid.NewGuid();
         schedule.LastRunUtc = DateTime.UtcNow;
         await releaseManager.ApplyAsync(schedule, ct).ConfigureAwait(false);
-        Config.Schedules = [.. Config.Schedules, schedule];
-        Plugin.Instance!.SaveConfiguration();
+        lock (ConfigLock)
+        {
+            Config.Schedules = [.. Config.Schedules, schedule];
+            Plugin.Instance!.SaveConfiguration();
+        }
+
         return Ok(ToDto(schedule));
     }
 
@@ -88,8 +94,12 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         updated.Id = id;
         updated.LastRunUtc = DateTime.UtcNow;
         await releaseManager.ApplyAsync(updated, ct).ConfigureAwait(false);
-        Config.Schedules = [.. Config.Schedules.Where(s => s.Id != id), updated];
-        Plugin.Instance!.SaveConfiguration();
+        lock (ConfigLock)
+        {
+            Config.Schedules = [.. Config.Schedules.Where(s => s.Id != id), updated];
+            Plugin.Instance!.SaveConfiguration();
+        }
+
         return Ok(ToDto(updated));
     }
 
@@ -103,8 +113,12 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         }
 
         await releaseManager.RemoveAsync(existing, ct).ConfigureAwait(false);
-        Config.Schedules = Config.Schedules.Where(s => s.Id != id).ToArray();
-        Plugin.Instance!.SaveConfiguration();
+        lock (ConfigLock)
+        {
+            Config.Schedules = Config.Schedules.Where(s => s.Id != id).ToArray();
+            Plugin.Instance!.SaveConfiguration();
+        }
+
         return NoContent();
     }
 
@@ -118,7 +132,11 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         }
 
         await releaseManager.ReleaseNextAsync(existing, existing.EpisodesPerTick, ct).ConfigureAwait(false);
-        Plugin.Instance!.SaveConfiguration(); // persist the advanced release frontier
+        lock (ConfigLock)
+        {
+            Plugin.Instance!.SaveConfiguration(); // persist the advanced release frontier
+        }
+
         return Ok(ToDto(existing));
     }
 
