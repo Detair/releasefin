@@ -816,6 +816,11 @@ public class ReleaseManager(
 
 Note for the implementer: if `GetUserById`, `GetPreference` nullability, or `PreferenceKind`'s namespace don't compile exactly as written, check the 10.10.7 source (`MediaBrowser.Controller/Library/IUserManager.cs`, `Jellyfin.Data/Entities/User.cs`) and adjust the call — the intent (read prefs, modify array, `UpdateUserAsync`) is verified.
 
+**AMENDMENT (post-review, applies to the code above):**
+1. `LockNewEpisodeAsync` frontier rule is wrong under multi-episode imports (other just-imported untagged episodes inflate the frontier, leaking a season pack). Replace with: let `firstTagged` = lowest-keyed episode (excluding the new one) still carrying the schedule tag. If `firstTagged` exists, the new episode stays visible only when `newKey.CompareTo(firstTagged) < 0` (back-fill inside the released prefix); otherwise tag it. If no tagged episode exists (drip caught up), always tag — a back-filled old episode self-heals on the next tick.
+2. `TickAsync` must persist progress even when a later schedule throws or shutdown cancels mid-loop: wrap the schedule loop in `try { ... } finally { if (changed) plugin.SaveConfiguration(); }`.
+3. Only log "locked new episode" when a write actually happened, and fix the `GetProgress` doc comment (it returns counts; it does not flag orphans).
+
 - [ ] **Step 2: Implement the service registrator**
 
 `src/Jellyfin.Plugin.ReleaseFin/PluginServiceRegistrator.cs`:
