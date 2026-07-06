@@ -1,0 +1,15 @@
+name: "ReleaseFin"
+guid: "e7d1f0a4-8c3b-4a5e-9f2d-6b0c4d8e1a23"
+version: "1.0.0.0"
+targetAbi: "10.10.0.0"
+framework: "net8.0"
+owner: "detair"
+overview: "Drip-release episodes to selected accounts on a schedule."
+description: >
+  Assign cron-style release schedules to series for selected accounts (e.g. Kids).
+  Unreleased episodes are hidden via per-schedule tags and the users' blocked-tags
+  parental control; the scheduler reveals the next episode as each release time passes.
+category: "General"
+artifacts:
+  - "Jellyfin.Plugin.ReleaseFin.dll"
+  - "Cronos.dll"
