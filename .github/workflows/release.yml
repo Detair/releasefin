@@ -1,0 +1,63 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      # Build from main so the manifest commit lands on the branch;
+      # tags are expected to point at the tip of main.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Derive version from tag
+        id: v
+        run: echo "version=${TAG#v}.0" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -o publish -p:Version="$V" --nologo
+          mkdir -p dist
+          (cd publish && zip "../dist/releasefin_${V}.zip" Jellyfin.Plugin.ReleaseFin.dll Cronos.dll)
+
+      - name: Update manifest
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          python3 scripts/update_manifest.py \
+            --version "$V" \
+            --zip "dist/releasefin_${V}.zip" \
+            --url "https://github.com/${REPO}/releases/download/${TAG}/releasefin_${V}.zip" \
+            --changelog "https://github.com/${REPO}/releases/tag/${TAG}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/*.zip \
+            --title "$TAG" \
+            --notes "Install via the plugin repository (see README) or extract the zip into config/plugins/ReleaseFin/."
+
+      - name: Commit manifest to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "chore: manifest for ${TAG}"
+          git push origin main

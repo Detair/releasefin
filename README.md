@@ -10,14 +10,17 @@ At each release time the scheduler removes the tag from the next episode(s) in a
 
 ## Install
 
-There is no plugin repository entry yet — install manually:
+**Via plugin repository (recommended):**
 
-1. Build the plugin:
+1. Dashboard → Plugins → Repositories → **+** and add:
    ```
-   dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -o publish
+   https://raw.githubusercontent.com/Detair/releasefin/main/manifest.json
    ```
-2. Copy **both** `Jellyfin.Plugin.ReleaseFin.dll` and `Cronos.dll` from the publish output into a `ReleaseFin` folder inside your Jellyfin plugin directory (e.g. `config/plugins/ReleaseFin/`). Cronos.dll is required — the plugin will not load without it.
-3. Restart Jellyfin. The plugin appears under Dashboard → Plugins as **ReleaseFin**.
+2. Catalog → **ReleaseFin** → Install, then restart Jellyfin.
+
+Updates show up in the catalog automatically.
+
+**Manually:** download the zip from the [latest release](https://github.com/Detair/releasefin/releases/latest) (or build with `dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -o publish`) and extract **both** `Jellyfin.Plugin.ReleaseFin.dll` and `Cronos.dll` into a `ReleaseFin` folder inside your Jellyfin plugin directory (e.g. `config/plugins/ReleaseFin/`). Cronos.dll is required — the plugin will not load without it. Restart Jellyfin.
 
 Requires Jellyfin 10.10.x.
 
