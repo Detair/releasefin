@@ -1,2 +1,4 @@
 bin/
 obj/
+dev/config/
+dev/media/

@@ -18,14 +18,19 @@ public sealed class ReleaseFinEntrypoint(
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        libraryManager.ItemAdded += OnItemAdded;
+        // Subscribe to both events: during a library scan ItemAdded can fire before the
+        // episode's series linkage and index numbers are populated, so the lock decision
+        // must be re-evaluated on ItemUpdated (idempotent via the frontier check).
+        libraryManager.ItemAdded += OnItemChanged;
+        libraryManager.ItemUpdated += OnItemChanged;
         _loop = Task.Run(() => RunLoopAsync(_cts.Token), CancellationToken.None);
         return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        libraryManager.ItemAdded -= OnItemAdded;
+        libraryManager.ItemAdded -= OnItemChanged;
+        libraryManager.ItemUpdated -= OnItemChanged;
         await _cts.CancelAsync().ConfigureAwait(false);
         if (_loop is not null)
         {
@@ -104,8 +109,16 @@ public sealed class ReleaseFinEntrypoint(
         }
     }
 
-    private void OnItemAdded(object? sender, ItemChangeEventArgs e)
+    private void OnItemChanged(object? sender, ItemChangeEventArgs e)
     {
+        // Pure MetadataEdit updates are this plugin's own tag writes (and manual metadata
+        // edits, which are not imports); reacting to them would re-lock episodes that
+        // RemoveAsync is untagging during schedule deletion.
+        if (e.UpdateReason == ItemUpdateType.MetadataEdit)
+        {
+            return;
+        }
+
         if (e.Item is not Episode episode || Plugin.Instance is null)
         {
             return;
