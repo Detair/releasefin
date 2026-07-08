@@ -24,6 +24,10 @@ public class ScheduleDto
 
     public int EpisodesPerTick { get; set; }
 
+    public PacingMode Pacing { get; set; }
+
+    public int BacklogCap { get; set; }
+
     public int? InitialSeason { get; set; }
 
     public int? InitialEpisode { get; set; }
@@ -189,6 +193,11 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
             return "Episodes per tick must be at least 1.";
         }
 
+        if (s.Pacing == PacingMode.BacklogCap && s.BacklogCap < 1)
+        {
+            return "Backlog cap must be at least 1.";
+        }
+
         return null;
     }
 
@@ -205,6 +214,8 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
             UserIds = s.UserIds,
             CronExpression = s.CronExpression,
             EpisodesPerTick = s.EpisodesPerTick,
+            Pacing = s.Pacing,
+            BacklogCap = s.BacklogCap,
             InitialSeason = s.InitialSeason,
             InitialEpisode = s.InitialEpisode,
             Enabled = s.Enabled,

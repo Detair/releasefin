@@ -82,9 +82,10 @@ public sealed class ReleaseFinEntrypoint(
                         continue;
                     }
 
-                    await releaseManager
-                        .ReleaseNextAsync(schedule, due * schedule.EpisodesPerTick, ct)
-                        .ConfigureAwait(false);
+                    await releaseManager.ReleaseDueAsync(schedule, due, ct).ConfigureAwait(false);
+
+                    // Advance even when pacing released nothing: gated/capped ticks are
+                    // forfeited, never banked (that's what keeps WatchGated non-stacking).
                     schedule.LastRunUtc = now;
                     changed = true;
                 }

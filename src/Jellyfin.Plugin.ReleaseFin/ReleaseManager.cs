@@ -14,6 +14,7 @@ namespace Jellyfin.Plugin.ReleaseFin;
 public class ReleaseManager(
     ILibraryManager libraryManager,
     IUserManager userManager,
+    IUserDataManager userDataManager,
     ILogger<ReleaseManager> logger)
 {
     private readonly SemaphoreSlim _mutex = new(1, 1);
@@ -97,6 +98,58 @@ public class ReleaseManager(
         {
             _mutex.Release();
         }
+    }
+
+    /// <summary>Scheduler entry point: releases as many episodes as the schedule's pacing mode
+    /// allows for the given due ticks. The unplayed count is read before taking the semaphore
+    /// (inside ReleaseNextAsync); benign race — the scheduler is the single writer.</summary>
+    public async Task<int> ReleaseDueAsync(ReleaseSchedule schedule, int dueTicks, CancellationToken ct)
+    {
+        // Accumulate never looks at play state; skip the per-user data cost entirely.
+        var unplayed = schedule.Pacing == PacingMode.Accumulate ? 0 : CountUnplayedReleased(schedule);
+        var count = PacingPolicy.ComputeReleaseCount(
+            schedule.Pacing, schedule.EpisodesPerTick, dueTicks, unplayed, schedule.BacklogCap);
+        return count > 0 ? await ReleaseNextAsync(schedule, count, ct).ConfigureAwait(false) : 0;
+    }
+
+    /// <summary>Episodes the plugin itself released (untagged AND after the initial offset) that at
+    /// least one assigned user has not played yet — "played" means played by ALL assigned users.
+    /// Deleted users are skipped; episodes released via the initial offset never gate.</summary>
+    private int CountUnplayedReleased(ReleaseSchedule schedule)
+    {
+        var tag = ReleaseFinTag.For(schedule.Id);
+        EpisodeKey? offset = schedule.InitialSeason is int s && schedule.InitialEpisode is int e
+            ? new EpisodeKey(s, e)
+            : null;
+        var users = schedule.UserIds
+            .Select(userManager.GetUserById)
+            .Where(u => u is not null)
+            .ToArray();
+        if (users.Length == 0)
+        {
+            return 0;
+        }
+
+        var unplayed = 0;
+        foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
+        {
+            if (offset is { } o && key.IsAtOrBefore(o))
+            {
+                continue; // pre-released by the initial offset, not by the plugin
+            }
+
+            if (episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+            {
+                continue; // still locked
+            }
+
+            if (users.Any(u => !userDataManager.GetUserData(u!, episode).Played))
+            {
+                unplayed++;
+            }
+        }
+
+        return unplayed;
     }
 
     /// <summary>On schedule deletion: untag everything and unblock the tag for all users (not just

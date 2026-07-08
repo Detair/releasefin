@@ -53,6 +53,17 @@
                 <div class="inputContainer">
                     <input is="emby-input" type="number" id="rfPerTick" label="Episodes per release" value="1" min="1"/>
                 </div>
+                <div class="selectContainer">
+                    <select is="emby-select" id="rfPacing" label="Pacing">
+                        <option value="Accumulate">Release on schedule (default)</option>
+                        <option value="WatchGated">Only after previous episodes are watched</option>
+                        <option value="BacklogCap">Cap unwatched backlog at N</option>
+                    </select>
+                </div>
+                <div class="inputContainer" id="rfBacklogCapRow" style="display:none;">
+                    <input is="emby-input" type="number" id="rfBacklogCap"
+                           label="Max unwatched episodes (N)" value="2" min="1"/>
+                </div>
                 <div class="inputContainer">
                     <input is="emby-input" type="text" id="rfOffset"
                            label="Already released up to (e.g. S01E05, empty = nothing)" placeholder="S01E05"/>
@@ -101,6 +112,17 @@
                     ('0' + m[2]).slice(-2) + ':' + ('0' + m[1]).slice(-2);
             }
             syncPresetRows();
+        }
+
+        function syncPacingRow() {
+            page.querySelector('#rfBacklogCapRow').style.display =
+                page.querySelector('#rfPacing').value === 'BacklogCap' ? '' : 'none';
+        }
+
+        function pacingLabel(s) {
+            if (s.Pacing === 'WatchGated') return ' · watch-gated';
+            if (s.Pacing === 'BacklogCap') return ' · cap ' + s.BacklogCap;
+            return '';
         }
 
         function syncPresetRows() {
@@ -160,7 +182,7 @@
                         return '<tr><td>' + esc(s.Name) + '</td><td>' + esc(s.SeriesName) + '</td>' +
                             '<td>' + s.Released + '/' + s.Total + ' released</td>' +
                             '<td>' + (s.NextRunUtc ? new Date(s.NextRunUtc + (s.NextRunUtc.endsWith('Z') ? '' : 'Z')).toLocaleString() : '—') + '</td>' +
-                            '<td>' + status + '</td>' +
+                            '<td>' + status + pacingLabel(s) + '</td>' +
                             '<td><button is="emby-button" type="button" class="raised rfEdit" data-id="' + s.Id + '">Edit</button> ' +
                             '<button is="emby-button" type="button" class="raised rfRelease" data-id="' + s.Id + '">Release now</button> ' +
                             '<button is="emby-button" type="button" class="raised button-delete rfDelete" data-id="' + s.Id + '">Delete</button></td></tr>';
@@ -180,6 +202,9 @@
             page.querySelector('#rfId').value = schedule ? schedule.Id : '';
             page.querySelector('#rfName').value = schedule ? schedule.Name : '';
             page.querySelector('#rfPerTick').value = schedule ? schedule.EpisodesPerTick : 1;
+            page.querySelector('#rfPacing').value = schedule ? schedule.Pacing : 'Accumulate';
+            page.querySelector('#rfBacklogCap').value = schedule ? schedule.BacklogCap : 2;
+            syncPacingRow();
             page.querySelector('#rfEnabled').checked = schedule ? schedule.Enabled : true;
             page.querySelector('#rfOffset').value = schedule && schedule.InitialSeason != null && schedule.InitialEpisode != null
                 ? 'S' + ('0' + schedule.InitialSeason).slice(-2) + 'E' + ('0' + schedule.InitialEpisode).slice(-2) : '';
@@ -197,6 +222,7 @@
         });
 
         page.querySelector('#rfPreset').addEventListener('change', syncPresetRows);
+        page.querySelector('#rfPacing').addEventListener('change', syncPacingRow);
         page.querySelector('#rfTime').addEventListener('change', updatePreview);
         page.querySelector('#rfWeekday').addEventListener('change', updatePreview);
         page.querySelector('#rfCron').addEventListener('input', updatePreview);
@@ -231,6 +257,8 @@
                     function (cb) { return cb.checked; }).map(function (cb) { return cb.value; }),
                 CronExpression: presetToCron(),
                 EpisodesPerTick: parseInt(page.querySelector('#rfPerTick').value, 10) || 1,
+                Pacing: page.querySelector('#rfPacing').value,
+                BacklogCap: parseInt(page.querySelector('#rfBacklogCap').value, 10) || 2,
                 InitialSeason: offset.season,
                 InitialEpisode: offset.episode,
                 Enabled: page.querySelector('#rfEnabled').checked

@@ -2,3 +2,4 @@ bin/
 obj/
 dev/config/
 dev/media/
+__pycache__/

@@ -1,3 +1,5 @@
+using Jellyfin.Plugin.ReleaseFin.Core;
+
 namespace Jellyfin.Plugin.ReleaseFin.Configuration;
 
 /// <summary>One drip-release assignment: a series, the restricted users, and the cadence.</summary>
@@ -15,6 +17,11 @@ public class ReleaseSchedule
     public string CronExpression { get; set; } = "0 16 * * *";
 
     public int EpisodesPerTick { get; set; } = 1;
+
+    public PacingMode Pacing { get; set; } = PacingMode.Accumulate;
+
+    /// <summary>Max released-but-unplayed episodes; only used when Pacing is BacklogCap.</summary>
+    public int BacklogCap { get; set; } = 2;
 
     /// <summary>Episodes at or before S(InitialSeason)E(InitialEpisode) start released. Null = everything locked.</summary>
     public int? InitialSeason { get; set; }

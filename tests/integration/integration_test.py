@@ -93,6 +93,30 @@ def add_episode(n):
     shutil.copy(FIXTURE, SERIES_DIR / f"Test Show S01E{n:02d}.mkv")
 
 
+def rewind_last_run(hours):
+    """Stop the container, move the (single) schedule's LastRunUtc back, restart.
+
+    Returns the rewound timestamp so callers can wait until the scheduler has
+    ticked (it rewrites LastRunUtc on the first due tick after startup)."""
+    ctl("stop", NAME)
+    xml = PLUGIN_CONFIG.read_text()
+    past = (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=hours, minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    xml, n = re.subn(r"<LastRunUtc>[^<]*</LastRunUtc>",
+                     f"<LastRunUtc>{past}</LastRunUtc>", xml)
+    check("rewound LastRunUtc in plugin config", n == 1, f"replacements={n}")
+    PLUGIN_CONFIG.write_text(xml)
+    ctl("start", NAME)
+    wait_server()
+    return past
+
+
+def wait_tick_persisted(past):
+    """Wait until the startup catch-up tick ran (LastRunUtc rewritten past the rewind)."""
+    wait_for("scheduler tick persisted",
+             lambda: f"<LastRunUtc>{past}</LastRunUtc>" not in PLUGIN_CONFIG.read_text())
+
+
 def main():
     print("== setup wizard")
     wait_server()
@@ -152,16 +176,7 @@ def main():
              lambda: [e["IndexNumber"] for e in episodes(kid, kid_id)] == [1, 2, 3])
 
     print("== scenario 3: downtime catch-up (3 missed days)")
-    ctl("stop", NAME)
-    xml = PLUGIN_CONFIG.read_text()
-    past = (datetime.datetime.now(datetime.timezone.utc)
-            - datetime.timedelta(hours=72, minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    xml, n = re.subn(r"<LastRunUtc>[^<]*</LastRunUtc>",
-                     f"<LastRunUtc>{past}</LastRunUtc>", xml)
-    check("rewound LastRunUtc in plugin config", n == 1, f"replacements={n}")
-    PLUGIN_CONFIG.write_text(xml)
-    ctl("start", NAME)
-    wait_server()
+    rewind_last_run(72)
     wait_for("catch-up released exactly 3 (kids sees E01-E06)",
              lambda: [e["IndexNumber"] for e in episodes(kid, kid_id)]
              == [1, 2, 3, 4, 5, 6])
@@ -188,6 +203,40 @@ def main():
     check("kids policy cleaned", kuser["Policy"]["BlockedTags"] == [])
     _, scheds = api("GET", "/ReleaseFin/Schedules", admin)
     check("schedule list empty", scheds == [])
+
+    print("== scenario 6: watch-gated pacing")
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-gated", "SeriesId": series_id, "UserIds": [kid_id],
+        "CronExpression": "0 16 * * *", "EpisodesPerTick": 1,
+        "Pacing": "WatchGated", "Enabled": True})
+    check("gated schedule created with 0 released",
+          status == 200 and sched["Released"] == 0 and sched["Pacing"] == "WatchGated",
+          f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+    wait_for("kids sees nothing", lambda: episodes(kid, kid_id) == [])
+
+    wait_tick_persisted(rewind_last_run(25))
+    wait_for("gated tick released exactly E01",
+             lambda: [e["IndexNumber"] for e in episodes(kid, kid_id)] == [1])
+
+    wait_tick_persisted(rewind_last_run(25))  # E01 still unplayed -> tick must not release
+    kids_sees = [e["IndexNumber"] for e in episodes(kid, kid_id)]
+    check("unwatched E01 gates the tick (still only E01)", kids_sees == [1],
+          f"kids={kids_sees}")
+
+    ep1_id = episodes(kid, kid_id)[0]["Id"]
+    status, _ = api("POST", f"/UserPlayedItems/{ep1_id}?userId={kid_id}", kid)
+    if status == 404:  # pre-10.9 fallback route
+        status, _ = api("POST", f"/Users/{kid_id}/PlayedItems/{ep1_id}", admin)
+    check("marked E01 played for kids", status == 200, f"status={status}")
+
+    wait_tick_persisted(rewind_last_run(25))
+    wait_for("watched E01 unlocks the next tick (kids sees E01-E02)",
+             lambda: [e["IndexNumber"] for e in episodes(kid, kid_id)] == [1, 2])
+
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
+    check("gated schedule delete accepted", status == 204, f"status={status}")
+    wait_for("kids sees all 8 again", lambda: len(episodes(kid, kid_id)) == 8)
 
     print("ALL SCENARIOS PASSED")
 
