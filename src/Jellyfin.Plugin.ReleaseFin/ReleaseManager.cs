@@ -313,9 +313,24 @@ public class ReleaseManager(
     /// reads churning tag state, so multi-item imports are fully order-independent; with no
     /// frontier (nothing released yet) the new item is always locked — anti-binge-safe.
     /// Series kind expects an Episode, Collection kind a Movie already linked into the BoxSet
-    /// (its pseudo key is its ordinal in the collection's current premiere ordering).</summary>
-    public async Task LockNewItemAsync(ReleaseSchedule schedule, BaseItem newItem, CancellationToken ct)
+    /// (its pseudo key is its ordinal in the collection's current premiere ordering).
+    /// <paramref name="isNewItem"/> gates Collection classification to true first-sight events
+    /// only (ItemAdded): a movie's ordinal is computed live from the collection's current
+    /// membership, so re-running this on an unrelated ItemUpdated for an EXISTING movie (e.g. a
+    /// routine metadata refresh) could see its ordinal shifted past the frontier by some other
+    /// import and re-lock an already-released movie — silently revoking access. Restricting to
+    /// ItemAdded trades away one narrow case (a pre-existing movie linked into an already-created
+    /// schedule's collection later, without itself being freshly imported, stays unclassified)
+    /// for safety in the common case. Episodes are unaffected: season/episode numbering is
+    /// intrinsic to the file, not derived from other items, so re-evaluating on ItemUpdated is
+    /// safe and still needed (series linkage isn't always populated yet at ItemAdded time).</summary>
+    public async Task LockNewItemAsync(ReleaseSchedule schedule, BaseItem newItem, bool isNewItem, CancellationToken ct)
     {
+        if (schedule.Kind == ScheduleKind.Collection && !isNewItem)
+        {
+            return;
+        }
+
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {

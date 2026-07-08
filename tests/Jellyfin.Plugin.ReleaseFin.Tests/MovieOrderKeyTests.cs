@@ -38,14 +38,15 @@ public class MovieOrderKeyTests
     }
 
     [Fact]
-    public void SortName_IsTheFinalFallback_NullAsEmpty()
+    public void SortName_IsTheFinalFallback_NullSortsLast()
     {
         var alpha = new MovieOrderKey(null, null, "Alpha");
         var zebra = new MovieOrderKey(null, null, "Zebra");
         var unnamed = new MovieOrderKey(null, null, null);
         Assert.True(alpha.CompareTo(zebra) < 0);
-        Assert.True(unnamed.CompareTo(alpha) < 0); // null sorts like the empty string
+        Assert.True(alpha.CompareTo(unnamed) < 0); // null sorts last, consistent with date/year
         Assert.Equal(0, alpha.CompareTo(alpha));
+        Assert.Equal(0, unnamed.CompareTo(unnamed));
     }
 
     [Fact]

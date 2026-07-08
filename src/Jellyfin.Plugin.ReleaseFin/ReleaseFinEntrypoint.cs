@@ -23,16 +23,16 @@ public sealed class ReleaseFinEntrypoint(
         // Subscribe to both events: during a library scan ItemAdded can fire before the
         // episode's series linkage and index numbers are populated, so the lock decision
         // must be re-evaluated on ItemUpdated (idempotent via the frontier check).
-        libraryManager.ItemAdded += OnItemChanged;
-        libraryManager.ItemUpdated += OnItemChanged;
+        libraryManager.ItemAdded += OnItemAdded;
+        libraryManager.ItemUpdated += OnItemUpdated;
         _loop = Task.Run(() => RunLoopAsync(_cts.Token), CancellationToken.None);
         return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        libraryManager.ItemAdded -= OnItemChanged;
-        libraryManager.ItemUpdated -= OnItemChanged;
+        libraryManager.ItemAdded -= OnItemAdded;
+        libraryManager.ItemUpdated -= OnItemUpdated;
         await _cts.CancelAsync().ConfigureAwait(false);
         if (_loop is not null)
         {
@@ -112,7 +112,11 @@ public sealed class ReleaseFinEntrypoint(
         }
     }
 
-    private void OnItemChanged(object? sender, ItemChangeEventArgs e)
+    private void OnItemAdded(object? sender, ItemChangeEventArgs e) => OnItemChanged(e, isNewItem: true);
+
+    private void OnItemUpdated(object? sender, ItemChangeEventArgs e) => OnItemChanged(e, isNewItem: false);
+
+    private void OnItemChanged(ItemChangeEventArgs e, bool isNewItem)
     {
         // Pure MetadataEdit updates are this plugin's own tag writes (and manual metadata
         // edits, which are not imports); reacting to them would re-lock episodes that
@@ -153,7 +157,7 @@ public sealed class ReleaseFinEntrypoint(
             {
                 try
                 {
-                    await releaseManager.LockNewItemAsync(schedule, item, _cts.Token)
+                    await releaseManager.LockNewItemAsync(schedule, item, isNewItem, _cts.Token)
                         .ConfigureAwait(false);
                 }
                 catch (Exception ex)
