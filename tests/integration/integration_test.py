@@ -28,7 +28,10 @@ CONFIG = pathlib.Path(os.environ["RF_CONFIG_DIR"])
 MEDIA = pathlib.Path(os.environ["RF_MEDIA_DIR"])
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "ep.mkv"
 AUTH_HDR = 'MediaBrowser Client="rf-it", Device="ci", DeviceId="rf-it", Version="1.0"'
-SERIES_DIR = MEDIA / "Test Show (2020)" / "Season 01"
+# Shows and movies live in sibling library roots so the tvshows scan never sees
+# the movie folders (a tvshows library would misclassify them as series).
+SERIES_DIR = MEDIA / "shows" / "Test Show (2020)" / "Season 01"
+MOVIES_DIR = MEDIA / "movies"
 PLUGIN_CONFIG = CONFIG / "plugins" / "configurations" / "Jellyfin.Plugin.ReleaseFin.xml"
 
 
@@ -91,8 +94,31 @@ def episodes(token, user_id):
     return d["Items"] if d else []
 
 
-def add_episode(n):
-    shutil.copy(FIXTURE, SERIES_DIR / f"Test Show S01E{n:02d}.mkv")
+def add_episode(n, season=1):
+    d = SERIES_DIR if season == 1 else SERIES_DIR.parent / f"Season {season:02d}"
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.copy(FIXTURE, d / f"Test Show S{season:02d}E{n:02d}.mkv")
+
+
+def movies(token, user_id):
+    _, d = api(
+        "GET",
+        f"/Items?IncludeItemTypes=Movie&Recursive=true&userId={user_id}"
+        "&SortBy=SortName&Fields=Tags,ProductionYear",
+        token,
+    )
+    return d["Items"] if d else []
+
+
+def ep_keys(token, user_id):
+    """Kid-visible episodes as sorted (season, episode) pairs; scenario 10 spans seasons."""
+    return sorted((e.get("ParentIndexNumber"), e["IndexNumber"])
+                  for e in episodes(token, user_id))
+
+
+def get_schedule(token, sched_id):
+    _, scheds = api("GET", "/ReleaseFin/Schedules", token)
+    return next((s for s in scheds or [] if s["Id"] == sched_id), None)
 
 
 def rewind_last_run(hours):
@@ -167,7 +193,7 @@ def main():
         add_episode(n)
     status, _ = api("POST",
                     "/Library/VirtualFolders?name=Shows&collectionType=tvshows"
-                    "&paths=%2Fmedia&refreshLibrary=true",
+                    "&paths=%2Fmedia%2Fshows&refreshLibrary=true",
                     admin, body={"LibraryOptions": {"EnableInternetProviders": False}})
     check("library created", status == 204, f"status={status}")
     _, kid_user = api("POST", "/Users/New", admin,
@@ -298,6 +324,7 @@ def main():
     hook_users = [u.replace("-", "").lower() for u in hook["users"]]
     check("webhook body names S01E01 of the series",
           hook["schedule"] == "it-notify" and "Test Show" in hook["series"]
+          and hook.get("event") == "released"
           and [(e["season"], e["episode"]) for e in hook["episodes"]] == [(1, 1)]
           and kid_id.replace("-", "").lower() in hook_users,
           f"hook={hook}")
@@ -409,6 +436,130 @@ def main():
               for t in e.get("Tags", []) if t.startswith("releasefin-")]
     check("zero releasefin tags after nousers delete", strays == [], f"strays={strays}")
     wait_for("kids sees all 8 at the end", lambda: len(episodes(kid, kid_id)) == 8)
+
+    print("== scenario 9: movie collection drip (premiere order)")
+    # NFOs with lockdata pin title/year/premiere date: without them a remote metadata
+    # provider can match these fake movies to real films and rewrite their years.
+    for name, year in (("Movie One (2001)", 2001), ("Movie Two (2002)", 2002),
+                       ("Movie Three (2003)", 2003)):
+        d = MOVIES_DIR / name
+        d.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURE, d / f"{name}.mkv")
+        (d / f"{name}.nfo").write_text(
+            f"<movie><title>{name.split(' (')[0]}</title><year>{year}</year>"
+            f"<premiered>{year}-06-15</premiered><lockdata>true</lockdata></movie>")
+    status, _ = api("POST",
+                    "/Library/VirtualFolders?name=Movies&collectionType=movies"
+                    "&paths=%2Fmedia%2Fmovies&refreshLibrary=true",
+                    admin, body={"LibraryOptions": {"EnableInternetProviders": False}})
+    check("movies library created", status == 204, f"status={status}")
+    wait_for("3 movies indexed", lambda: len(movies(admin, admin_id)) == 3)
+    by_year = {m.get("ProductionYear"): m for m in movies(admin, admin_id)}
+    check("movie years parsed from folder names", set(by_year) == {2001, 2002, 2003},
+          f"years={sorted(by_year)}")
+    ids = ",".join(by_year[y]["Id"] for y in (2001, 2002, 2003))
+    status, coll = api("POST", f"/Collections?name=It%20Movies&ids={ids}", admin)
+    check("collection created", status == 200 and coll and coll.get("Id"),
+          f"status={status} coll={coll}")
+    coll_id = coll["Id"]
+
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-movies", "SeriesId": coll_id, "UserIds": [kid_id],
+        "Kind": "Collection",
+        # Feb 29 03:00: never fires; releases happen only via ReleaseNow.
+        "CronExpression": "0 3 29 2 *", "EpisodesPerTick": 1, "Enabled": True})
+    check("collection schedule created with 0/3 released",
+          status == 200 and sched["Kind"] == "Collection"
+          and sched["Released"] == 0 and sched["Total"] == 3
+          and "It Movies" in sched["SeriesName"],
+          f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+    wait_for("kids sees no movies", lambda: movies(kid, kid_id) == [])
+
+    status, sched = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseNow", admin)
+    check("release-now returns 1/3", status == 200 and sched["Released"] == 1,
+          f"status={status} sched={sched}")
+    wait_for("kids sees exactly Movie One (2001, earliest premiere)",
+             lambda: [m.get("ProductionYear") for m in movies(kid, kid_id)] == [2001])
+    status, sched = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseNow", admin)
+    check("second release-now returns 2/3", status == 200 and sched["Released"] == 2,
+          f"status={status} sched={sched}")
+    wait_for("kids sees 2001 + 2002",
+             lambda: sorted(m.get("ProductionYear") for m in movies(kid, kid_id))
+             == [2001, 2002])
+
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
+    check("collection schedule delete accepted", status == 204, f"status={status}")
+    wait_for("kids sees all 3 movies", lambda: len(movies(kid, kid_id)) == 3)
+    strays = [t for m in movies(admin, admin_id)
+              for t in m.get("Tags", []) if t.startswith("releasefin-")]
+    check("zero releasefin tags on movies", strays == [], f"strays={strays}")
+
+    print("== scenario 10: pause at season end")
+    add_episode(1, season=2)
+    add_episode(2, season=2)
+    api("POST", "/Library/Refresh", admin)
+    wait_for("10 episodes indexed", lambda: len(episodes(admin, admin_id)) == 10)
+
+    # Daily cron ~12h away from now: a 25h rewind then yields exactly ONE due tick.
+    # (A cron near the current hour can fall twice inside the 25h window, and this
+    # schedule is Accumulate, where due ticks stack — unlike scenario 6's WatchGated.)
+    pause_hour = (datetime.datetime.now(datetime.timezone.utc).hour + 12) % 24
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-pause", "SeriesId": series_id, "UserIds": [kid_id],
+        "CronExpression": f"0 {pause_hour} * * *", "EpisodesPerTick": 1,
+        "InitialSeason": 1, "InitialEpisode": 7,
+        "PauseAtSeasonEnd": True, "Enabled": True})
+    check("pause schedule created 7/10 with the flag armed",
+          status == 200 and sched["Released"] == 7 and sched["Total"] == 10
+          and sched["PauseAtSeasonEnd"] is True and sched["SeasonPaused"] is False,
+          f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+
+    # Tick 1: next locked episode is S01E08 (same season) -> releases normally.
+    wait_tick_persisted(rewind_last_run(25))
+    wait_for("tick released S01E08 (kids sees all of season 1)",
+             lambda: ep_keys(kid, kid_id) == [(1, n) for n in range(1, 9)])
+    sched = get_schedule(admin, sched_id)
+    check("not paused after an in-season release",
+          sched and sched["SeasonPaused"] is False, f"sched={sched}")
+
+    # Tick 2: next locked episode is S02E01 -> pause instead of crossing the boundary.
+    wait_tick_persisted(rewind_last_run(25))
+    wait_for("schedule flagged SeasonPaused at the boundary",
+             lambda: (get_schedule(admin, sched_id) or {}).get("SeasonPaused") is True, 60)
+    kids_keys = ep_keys(kid, kid_id)
+    check("boundary tick released nothing",
+          kids_keys == [(1, n) for n in range(1, 9)], f"kids={kids_keys}")
+
+    def paused_activity():
+        _, d = api("GET", "/System/ActivityLog/Entries?hasUserId=false", admin)
+        return [x for x in (d or {}).get("Items", [])
+                if x.get("Type") == "ReleaseFin.SeasonPaused"]
+    entries = wait_for("season-pause activity log entry", paused_activity, 30)
+    check("pause entry names the schedule", "it-pause" in entries[0]["Name"],
+          f"entry={entries[0]}")
+
+    status, sched = api("POST", f"/ReleaseFin/Schedules/{sched_id}/Resume", admin)
+    check("resume crossed into season 2 (9/10, pause cleared)",
+          status == 200 and sched["SeasonPaused"] is False and sched["Released"] == 9,
+          f"status={status} sched={sched}")
+    wait_for("kids sees S02E01", lambda: (2, 1) in ep_keys(kid, kid_id))
+    status, _ = api("POST", f"/ReleaseFin/Schedules/{sched_id}/Resume", admin)
+    check("resume while not paused rejected", status == 400, f"status={status}")
+    status, _ = api(
+        "POST", "/ReleaseFin/Schedules/00000000-0000-0000-0000-000000000000/Resume", admin)
+    check("resume of unknown schedule is 404", status == 404, f"status={status}")
+
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
+    check("pause schedule delete accepted", status == 204, f"status={status}")
+    wait_for("kids sees all 10 episodes at the end",
+             lambda: len(episodes(kid, kid_id)) == 10)
+    strays = [(e.get("ParentIndexNumber"), e["IndexNumber"], t)
+              for e in episodes(admin, admin_id)
+              for t in e.get("Tags", []) if t.startswith("releasefin-")]
+    check("zero releasefin tags after pause-schedule delete", strays == [],
+          f"strays={strays}")
 
     print("ALL SCENARIOS PASSED")
 

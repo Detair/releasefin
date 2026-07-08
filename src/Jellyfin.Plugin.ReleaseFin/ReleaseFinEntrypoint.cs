@@ -1,4 +1,6 @@
+using Jellyfin.Plugin.ReleaseFin.Configuration;
 using Jellyfin.Plugin.ReleaseFin.Core;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Hosting;
@@ -7,7 +9,7 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.ReleaseFin;
 
 /// <summary>Runs the drip scheduler (1-minute timer; catch-up after downtime is inherent because
-/// due ticks are counted from the persisted LastRunUtc) and locks newly imported episodes.</summary>
+/// due ticks are counted from the persisted LastRunUtc) and locks newly imported episodes/movies.</summary>
 public sealed class ReleaseFinEntrypoint(
     ReleaseManager releaseManager,
     ILibraryManager libraryManager,
@@ -120,35 +122,51 @@ public sealed class ReleaseFinEntrypoint(
             return;
         }
 
-        if (e.Item is not Episode episode || Plugin.Instance is null)
+        if (Plugin.Instance is null)
         {
             return;
         }
 
-        var schedules = Plugin.Instance.Configuration.Schedules
-            .Where(s => s.Enabled && s.SeriesId == episode.SeriesId)
-            .ToArray();
+        // Episodes match a Series schedule by series id; movies match a Collection schedule
+        // when the scheduled BoxSet's children contain them (imports are rare, so enumerating
+        // the collection per event is fine).
+        ReleaseSchedule[] schedules = e.Item switch
+        {
+            Episode episode => Plugin.Instance.Configuration.Schedules
+                .Where(s => s.Enabled && s.Kind == ScheduleKind.Series && s.SeriesId == episode.SeriesId)
+                .ToArray(),
+            Movie movie => Plugin.Instance.Configuration.Schedules
+                .Where(s => s.Enabled && s.Kind == ScheduleKind.Collection
+                    && CollectionContains(s.SeriesId, movie.Id))
+                .ToArray(),
+            _ => [],
+        };
         if (schedules.Length == 0)
         {
             return;
         }
 
+        var item = e.Item;
         _ = Task.Run(async () =>
         {
             foreach (var schedule in schedules)
             {
                 try
                 {
-                    await releaseManager.LockNewEpisodeAsync(schedule, episode, _cts.Token)
+                    await releaseManager.LockNewItemAsync(schedule, item, _cts.Token)
                         .ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "ReleaseFin: failed to lock new episode for {Name}", schedule.Name);
+                    logger.LogError(ex, "ReleaseFin: failed to lock new item for {Name}", schedule.Name);
                 }
             }
         });
     }
+
+    private bool CollectionContains(Guid collectionId, Guid movieId) =>
+        libraryManager.GetItemById(collectionId) is BoxSet boxSet
+        && boxSet.GetLinkedChildren().Any(c => c.Id == movieId);
 
     public void Dispose() => _cts.Dispose();
 }

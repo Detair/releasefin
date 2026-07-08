@@ -33,7 +33,51 @@ public class ReleaseNotifier(
         }
 
         await WriteActivityLogAsync(schedule, seriesName, released).ConfigureAwait(false);
-        await PostWebhookAsync(schedule, seriesName, released, ct).ConfigureAwait(false);
+        var payload = new
+        {
+            @event = "released",
+            schedule = schedule.Name,
+            series = seriesName,
+            episodes = released
+                .Select(e => new { season = e.Season, episode = e.Episode, name = e.Name })
+                .ToArray(),
+            users = schedule.UserIds
+        };
+        await PostWebhookAsync(schedule, payload, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Season-end pause notice: an activity log entry always, plus the webhook (with
+    /// event=seasonPaused) when configured. Same never-throw contract as NotifyAsync.</summary>
+    public async Task NotifySeasonPausedAsync(
+        ReleaseSchedule schedule, string seriesName, int nextSeason, CancellationToken ct)
+    {
+        try
+        {
+            var name = Truncate(
+                $"ReleaseFin: {schedule.Name} paused at a season end of {seriesName} "
+                + $"(resume to start season {nextSeason})", ActivityTextMax);
+            var entry = new ActivityLog(name, "ReleaseFin.SeasonPaused", Guid.Empty)
+            {
+                ShortOverview = Truncate(
+                    $"{seriesName}: season finished — resume to continue ({schedule.Name})", ActivityTextMax)
+            };
+            await activityManager.CreateAsync(entry).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex, "ReleaseFin: failed to write season-pause activity entry for schedule {Name}", schedule.Name);
+        }
+
+        var payload = new
+        {
+            @event = "seasonPaused",
+            schedule = schedule.Name,
+            series = seriesName,
+            nextSeason,
+            users = schedule.UserIds
+        };
+        await PostWebhookAsync(schedule, payload, ct).ConfigureAwait(false);
     }
 
     private async Task WriteActivityLogAsync(
@@ -59,11 +103,7 @@ public class ReleaseNotifier(
         }
     }
 
-    private async Task PostWebhookAsync(
-        ReleaseSchedule schedule,
-        string seriesName,
-        IReadOnlyList<(int Season, int Episode, string Name)> released,
-        CancellationToken ct)
+    private async Task PostWebhookAsync(ReleaseSchedule schedule, object payload, CancellationToken ct)
     {
         var url = Plugin.Instance?.Configuration.WebhookUrl;
         if (string.IsNullOrWhiteSpace(url))
@@ -73,15 +113,6 @@ public class ReleaseNotifier(
 
         try
         {
-            var payload = new
-            {
-                schedule = schedule.Name,
-                series = seriesName,
-                episodes = released
-                    .Select(e => new { season = e.Season, episode = e.Episode, name = e.Name })
-                    .ToArray(),
-                users = schedule.UserIds
-            };
             using var content = new StringContent(
                 JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);

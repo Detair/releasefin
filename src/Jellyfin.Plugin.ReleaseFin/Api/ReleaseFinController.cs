@@ -14,9 +14,13 @@ public class ScheduleDto
 
     public string Name { get; set; } = string.Empty;
 
+    /// <summary>Id of the scheduled series or collection (historical name).</summary>
     public Guid SeriesId { get; set; }
 
+    /// <summary>Name of the scheduled series or collection (historical name).</summary>
     public string SeriesName { get; set; } = string.Empty;
+
+    public ScheduleKind Kind { get; set; }
 
     public Guid[] UserIds { get; set; } = [];
 
@@ -33,6 +37,11 @@ public class ScheduleDto
     public int? InitialEpisode { get; set; }
 
     public bool Enabled { get; set; }
+
+    public bool PauseAtSeasonEnd { get; set; }
+
+    /// <summary>True when the schedule stopped at a season boundary and awaits a manual Resume.</summary>
+    public bool SeasonPaused { get; set; }
 
     public int Released { get; set; }
 
@@ -92,6 +101,7 @@ public class ReleaseFinController(
 
         schedule.Id = Guid.NewGuid();
         schedule.LastRunUtc = DateTime.UtcNow;
+        schedule.SeasonPaused = false; // state is owned by the scheduler, never by the client
 
         // Register the schedule in config BEFORE tagging: a concurrent stray-tag cleanup
         // must always see the id as live, or it would strip the tags being applied.
@@ -131,6 +141,7 @@ public class ReleaseFinController(
         // sees the id as live throughout the remove/apply window.
         updated.Id = id;
         updated.LastRunUtc = DateTime.UtcNow;
+        updated.SeasonPaused = false; // fresh apply = fresh pause state
         lock (ConfigLock)
         {
             Config.Schedules = [.. Config.Schedules.Where(s => s.Id != id), updated];
@@ -212,6 +223,32 @@ public class ReleaseFinController(
         return Ok(ToDto(existing));
     }
 
+    /// <summary>Clears a season-end pause and immediately releases the next batch, moving the
+    /// frontier into the new season so the pause re-arms for the NEXT boundary.</summary>
+    [HttpPost("Schedules/{id}/Resume")]
+    public async Task<ActionResult<ScheduleDto>> Resume(Guid id, CancellationToken ct)
+    {
+        var existing = Config.Schedules.FirstOrDefault(s => s.Id == id);
+        if (existing is null)
+        {
+            return NotFound();
+        }
+
+        if (!existing.SeasonPaused)
+        {
+            return BadRequest("Schedule is not paused at a season end.");
+        }
+
+        existing.SeasonPaused = false;
+        await releaseManager.ReleaseNextAsync(existing, existing.EpisodesPerTick, ct).ConfigureAwait(false);
+        lock (ConfigLock)
+        {
+            Plugin.Instance!.SaveConfiguration(); // persist the cleared pause + advanced frontier
+        }
+
+        return Ok(ToDto(existing));
+    }
+
     [HttpPost("Maintenance/CleanStrayTags")]
     public async Task<ActionResult<CleanStrayTagsResultDto>> CleanStrayTags(CancellationToken ct)
     {
@@ -280,7 +317,9 @@ public class ReleaseFinController(
 
         if (s.SeriesId == Guid.Empty)
         {
-            return "A series must be selected.";
+            return s.Kind == ScheduleKind.Collection
+                ? "A collection must be selected."
+                : "A series must be selected.";
         }
 
         if (s.UserIds.Length == 0)
@@ -310,7 +349,8 @@ public class ReleaseFinController(
             Id = s.Id,
             Name = s.Name,
             SeriesId = s.SeriesId,
-            SeriesName = series?.Name ?? "(deleted series)",
+            SeriesName = series?.Name ?? "(deleted item)",
+            Kind = s.Kind,
             UserIds = s.UserIds,
             CronExpression = s.CronExpression,
             EpisodesPerTick = s.EpisodesPerTick,
@@ -319,6 +359,8 @@ public class ReleaseFinController(
             InitialSeason = s.InitialSeason,
             InitialEpisode = s.InitialEpisode,
             Enabled = s.Enabled,
+            PauseAtSeasonEnd = s.PauseAtSeasonEnd,
+            SeasonPaused = s.SeasonPaused,
             Released = released,
             Total = total,
             NextRunUtc = ScheduleCalculator.IsValid(s.CronExpression)

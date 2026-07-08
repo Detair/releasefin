@@ -2,6 +2,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.ReleaseFin.Configuration;
 using Jellyfin.Plugin.ReleaseFin.Core;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Logging;
@@ -20,7 +21,7 @@ public class ReleaseManager(
 {
     private readonly SemaphoreSlim _mutex = new(1, 1);
 
-    /// <summary>On schedule creation: lock every episode after the initial offset, then block the tag for each user.</summary>
+    /// <summary>On schedule creation: lock every item after the initial offset, then block the tag for each user.</summary>
     public async Task ApplyAsync(ReleaseSchedule schedule, CancellationToken ct)
     {
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
@@ -35,14 +36,14 @@ public class ReleaseManager(
             schedule.ReleasedUpToSeason = offset?.Season;
             schedule.ReleasedUpToEpisode = offset?.Episode;
 
-            foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
+            foreach (var (item, key) in GetOrderedItems(schedule))
             {
                 if (offset is { } o && key.IsAtOrBefore(o))
                 {
                     continue;
                 }
 
-                await SetTagAsync(episode, tag, present: true, ct).ConfigureAwait(false);
+                await SetTagAsync(item, tag, present: true, ct).ConfigureAwait(false);
             }
 
             await SetUserBlockAsync(schedule.UserIds, tag, blocked: true).ConfigureAwait(false);
@@ -54,7 +55,7 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>Release the next N still-locked episodes in aired order. Returns how many were released.</summary>
+    /// <summary>Release the next N still-locked items in release order. Returns how many were released.</summary>
     public Task<int> ReleaseNextAsync(ReleaseSchedule schedule, int count, CancellationToken ct) =>
         ReleaseWhileAsync(schedule, (_, releasedSoFar) => releasedSoFar < count, ct);
 
@@ -63,10 +64,10 @@ public class ReleaseManager(
     public Task<int> ReleaseUpToAsync(ReleaseSchedule schedule, EpisodeKey target, CancellationToken ct) =>
         ReleaseWhileAsync(schedule, (key, _) => key.IsAtOrBefore(target), ct);
 
-    /// <summary>Releases still-locked episodes in aired order while the predicate (episode key,
+    /// <summary>Releases still-locked items in release order while the predicate (item key,
     /// count released so far) holds. This is the single choke point for every release path
-    /// (scheduler ticks, catch-up, ReleaseNow, ReleaseUpTo), so notifications fire here — after
-    /// the semaphore is released, once per batch, and never failing the release.</summary>
+    /// (scheduler ticks, catch-up, ReleaseNow, ReleaseUpTo, Resume), so notifications fire here —
+    /// after the semaphore is released, once per batch, and never failing the release.</summary>
     private async Task<int> ReleaseWhileAsync(
         ReleaseSchedule schedule, Func<EpisodeKey, int, bool> keepReleasing, CancellationToken ct)
     {
@@ -76,22 +77,22 @@ public class ReleaseManager(
         {
             var tag = ReleaseFinTag.For(schedule.Id);
 
-            foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
+            foreach (var (item, key) in GetOrderedItems(schedule))
             {
                 if (!keepReleasing(key, released.Count))
                 {
                     break;
                 }
 
-                if (!episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+                if (!item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                await SetTagAsync(episode, tag, present: false, ct).ConfigureAwait(false);
-                released.Add((key.Season, key.Episode, episode.Name ?? string.Empty));
+                await SetTagAsync(item, tag, present: false, ct).ConfigureAwait(false);
+                released.Add((key.Season, key.Episode, item.Name ?? string.Empty));
 
-                // Advance the persisted import-classification frontier past this episode.
+                // Advance the persisted import-classification frontier past this item.
                 var frontier = GetFrontier(schedule);
                 if (frontier is not { } f || key.CompareTo(f) > 0)
                 {
@@ -103,7 +104,7 @@ public class ReleaseManager(
             if (released.Count > 0)
             {
                 logger.LogInformation(
-                    "ReleaseFin: released {Count} episode(s) for schedule {Name}", released.Count, schedule.Name);
+                    "ReleaseFin: released {Count} item(s) for schedule {Name}", released.Count, schedule.Name);
             }
         }
         finally
@@ -130,11 +131,22 @@ public class ReleaseManager(
         return released.Count;
     }
 
-    /// <summary>Scheduler entry point: releases as many episodes as the schedule's pacing mode
-    /// allows for the given due ticks. The unplayed count is read before taking the semaphore
-    /// (inside ReleaseNextAsync); benign race — the scheduler is the single writer.</summary>
+    /// <summary>Scheduler entry point: releases as many items as the schedule's pacing mode
+    /// allows for the given due ticks — unless the schedule is (or just became) season-paused.
+    /// The unplayed count is read before taking the semaphore (inside ReleaseNextAsync);
+    /// benign race — the scheduler is the single writer.</summary>
     public async Task<int> ReleaseDueAsync(ReleaseSchedule schedule, int dueTicks, CancellationToken ct)
     {
+        if (schedule.SeasonPaused)
+        {
+            return 0; // waiting for a manual Resume; due ticks are forfeited, never banked
+        }
+
+        if (await PauseIfSeasonBoundaryAsync(schedule, ct).ConfigureAwait(false))
+        {
+            return 0; // the caller (scheduler tick) persists the SeasonPaused flip
+        }
+
         // Accumulate never looks at play state; skip the per-user data cost entirely.
         var unplayed = schedule.Pacing == PacingMode.Accumulate ? 0 : CountUnplayedReleased(schedule);
         var count = PacingPolicy.ComputeReleaseCount(
@@ -142,9 +154,38 @@ public class ReleaseManager(
         return count > 0 ? await ReleaseNextAsync(schedule, count, ct).ConfigureAwait(false) : 0;
     }
 
-    /// <summary>Episodes the plugin itself released (untagged AND after the initial offset) that at
+    /// <summary>Season-end gate (Series kind with PauseAtSeasonEnd): when the next still-locked
+    /// episode (in aired order) starts a later season than the release frontier, flips
+    /// SeasonPaused and notifies instead of releasing. Tag state is read outside the semaphore
+    /// like CountUnplayedReleased: benign race, the scheduler is the single writer.</summary>
+    private async Task<bool> PauseIfSeasonBoundaryAsync(ReleaseSchedule schedule, CancellationToken ct)
+    {
+        if (!schedule.PauseAtSeasonEnd || schedule.Kind != ScheduleKind.Series
+            || GetFrontier(schedule) is not { } frontier)
+        {
+            return false;
+        }
+
+        var tag = ReleaseFinTag.For(schedule.Id);
+        var next = GetOrderedItems(schedule)
+            .FirstOrDefault(p => p.Item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase));
+        if (next.Item is null || next.Key.Season <= frontier.Season)
+        {
+            return false;
+        }
+
+        schedule.SeasonPaused = true;
+        logger.LogInformation(
+            "ReleaseFin: schedule {Name} paused at the end of season {Season}",
+            schedule.Name, frontier.Season);
+        var seriesName = libraryManager.GetItemById(schedule.SeriesId)?.Name ?? "(unknown series)";
+        await notifier.NotifySeasonPausedAsync(schedule, seriesName, next.Key.Season, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>Items the plugin itself released (untagged AND after the initial offset) that at
     /// least one assigned user has not played yet — "played" means played by ALL assigned users.
-    /// Deleted users are skipped; episodes released via the initial offset never gate.</summary>
+    /// Deleted users are skipped; items released via the initial offset never gate.</summary>
     private int CountUnplayedReleased(ReleaseSchedule schedule)
     {
         var tag = ReleaseFinTag.For(schedule.Id);
@@ -161,19 +202,19 @@ public class ReleaseManager(
         }
 
         var unplayed = 0;
-        foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
+        foreach (var (item, key) in GetOrderedItems(schedule))
         {
             if (offset is { } o && key.IsAtOrBefore(o))
             {
                 continue; // pre-released by the initial offset, not by the plugin
             }
 
-            if (episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+            if (item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
             {
                 continue; // still locked
             }
 
-            if (users.Any(u => !userDataManager.GetUserData(u!, episode).Played))
+            if (users.Any(u => !userDataManager.GetUserData(u!, item).Played))
             {
                 unplayed++;
             }
@@ -191,9 +232,9 @@ public class ReleaseManager(
         {
             var tag = ReleaseFinTag.For(schedule.Id);
 
-            foreach (var (episode, _) in GetOrderedEpisodes(schedule.SeriesId))
+            foreach (var (item, _) in GetOrderedItems(schedule))
             {
-                await SetTagAsync(episode, tag, present: false, ct).ConfigureAwait(false);
+                await SetTagAsync(item, tag, present: false, ct).ConfigureAwait(false);
             }
 
             var allUserIds = userManager.Users.Select(u => u.Id).ToArray();
@@ -207,9 +248,9 @@ public class ReleaseManager(
     }
 
     /// <summary>Maintenance sweep: removes every releasefin-* tag that belongs to no existing
-    /// schedule (including unparseable releasefin-* tags) from all episodes in the library and
-    /// from every user's blocked-tags preference. The documented uninstall story. SAFETY: only
-    /// releasefin-prefixed entries are ever considered; other tags are never touched.</summary>
+    /// schedule (including unparseable releasefin-* tags) from all episodes and movies in the
+    /// library and from every user's blocked-tags preference. The documented uninstall story.
+    /// SAFETY: only releasefin-prefixed entries are ever considered; other tags are never touched.</summary>
     public async Task<(int ItemsCleaned, int UsersCleaned)> CleanStrayTagsAsync(CancellationToken ct)
     {
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
@@ -221,12 +262,12 @@ public class ReleaseManager(
                 && (!ReleaseFinTag.TryGetScheduleId(tag, out var id) || !knownIds.Contains(id));
 
             var itemsCleaned = 0;
-            var allEpisodes = libraryManager.GetItemList(new InternalItemsQuery
+            var allItems = libraryManager.GetItemList(new InternalItemsQuery
             {
-                IncludeItemTypes = [BaseItemKind.Episode],
+                IncludeItemTypes = [BaseItemKind.Episode, BaseItemKind.Movie],
                 Recursive = true
             });
-            foreach (var item in allEpisodes)
+            foreach (var item in allItems)
             {
                 var kept = item.Tags.Where(t => !IsStray(t)).ToArray();
                 if (kept.Length == item.Tags.Length)
@@ -267,33 +308,53 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>A newly imported episode arrives locked unless it sorts at or before the schedule's
+    /// <summary>A newly imported item arrives locked unless it sorts at or before the schedule's
     /// persisted release frontier (back-fill inside the released region). Classification never
-    /// reads churning tag state, so multi-episode imports are fully order-independent; with no
-    /// frontier (nothing released yet) the new episode is always locked — anti-binge-safe.</summary>
-    public async Task LockNewEpisodeAsync(ReleaseSchedule schedule, Episode newEpisode, CancellationToken ct)
+    /// reads churning tag state, so multi-item imports are fully order-independent; with no
+    /// frontier (nothing released yet) the new item is always locked — anti-binge-safe.
+    /// Series kind expects an Episode, Collection kind a Movie already linked into the BoxSet
+    /// (its pseudo key is its ordinal in the collection's current premiere ordering).</summary>
+    public async Task LockNewItemAsync(ReleaseSchedule schedule, BaseItem newItem, CancellationToken ct)
     {
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!EpisodeKey.TryCreate(newEpisode.ParentIndexNumber, newEpisode.IndexNumber, out var newKey)
-                || newKey.IsSpecial)
+            (BaseItem Item, EpisodeKey Key) target;
+            if (schedule.Kind == ScheduleKind.Series && newItem is Episode episode)
+            {
+                if (!EpisodeKey.TryCreate(episode.ParentIndexNumber, episode.IndexNumber, out var key)
+                    || key.IsSpecial)
+                {
+                    return;
+                }
+
+                target = (episode, key);
+            }
+            else if (schedule.Kind == ScheduleKind.Collection && newItem is Movie)
+            {
+                target = GetOrderedItems(schedule).FirstOrDefault(p => p.Item.Id == newItem.Id);
+                if (target.Item is null)
+                {
+                    return; // not (yet) linked into the collection; nothing to classify
+                }
+            }
+            else
             {
                 return;
             }
 
-            if (GetFrontier(schedule) is { } f && newKey.IsAtOrBefore(f))
+            if (GetFrontier(schedule) is { } f && target.Key.IsAtOrBefore(f))
             {
                 return; // back-fill inside the already-released region stays visible
             }
 
             var tag = ReleaseFinTag.For(schedule.Id);
-            var wrote = await SetTagAsync(newEpisode, tag, present: true, ct).ConfigureAwait(false);
+            var wrote = await SetTagAsync(target.Item, tag, present: true, ct).ConfigureAwait(false);
             if (wrote)
             {
                 logger.LogInformation(
-                    "ReleaseFin: locked new episode S{Season}E{Episode} for schedule {Name}",
-                    newKey.Season, newKey.Episode, schedule.Name);
+                    "ReleaseFin: locked new item S{Season}E{Episode} for schedule {Name}",
+                    target.Key.Season, target.Key.Episode, schedule.Name);
             }
         }
         finally
@@ -302,13 +363,13 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>(released, total) counts of drip-eligible episodes for the schedule's series.</summary>
+    /// <summary>(released, total) counts of drip-eligible items for the schedule's target.</summary>
     public (int Released, int Total) GetProgress(ReleaseSchedule schedule)
     {
         var tag = ReleaseFinTag.For(schedule.Id);
-        var episodes = GetOrderedEpisodes(schedule.SeriesId).ToList();
-        var locked = episodes.Count(p => p.Episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase));
-        return (episodes.Count - locked, episodes.Count);
+        var items = GetOrderedItems(schedule).ToList();
+        var locked = items.Count(p => p.Item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase));
+        return (items.Count - locked, items.Count);
     }
 
     /// <summary>The schedule's persisted release high-water mark, or null when nothing released yet.</summary>
@@ -317,12 +378,29 @@ public class ReleaseManager(
             ? new EpisodeKey(s, e)
             : null;
 
-    /// <summary>Drip-eligible episodes of the series in aired order (orderable, non-special).</summary>
-    private IEnumerable<(Episode Episode, EpisodeKey Key)> GetOrderedEpisodes(Guid seriesId) =>
-        libraryManager.GetItemList(new InternalItemsQuery
+    /// <summary>Drip-eligible items of the schedule's target in release order. Series: episodes
+    /// in aired order (orderable, non-special). Collection: the BoxSet's movies in premiere order
+    /// (see MovieOrderKey), mapped to pseudo keys S1E(ordinal) — never special, so all existing
+    /// offset/frontier/pacing logic applies unchanged.</summary>
+    private IEnumerable<(BaseItem Item, EpisodeKey Key)> GetOrderedItems(ReleaseSchedule schedule)
+    {
+        if (schedule.Kind == ScheduleKind.Collection)
+        {
+            if (libraryManager.GetItemById(schedule.SeriesId) is not BoxSet boxSet)
+            {
+                return [];
+            }
+
+            return boxSet.GetLinkedChildren()
+                .OfType<Movie>()
+                .OrderBy(m => new MovieOrderKey(m.PremiereDate, m.ProductionYear, m.SortName))
+                .Select((m, index) => ((BaseItem)m, new EpisodeKey(1, index + 1)));
+        }
+
+        return libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes = [BaseItemKind.Episode],
-            AncestorIds = [seriesId],
+            AncestorIds = [schedule.SeriesId],
             Recursive = true
         })
         .OfType<Episode>()
@@ -331,25 +409,26 @@ public class ReleaseManager(
             Key: key))
         .Where(t => t.HasKey && !t.Key.IsSpecial)
         .OrderBy(t => t.Key)
-        .Select(t => (t.Episode, t.Key));
+        .Select(t => ((BaseItem)t.Episode, t.Key));
+    }
 
     /// <summary>Returns true when a metadata write actually happened.</summary>
-    private async Task<bool> SetTagAsync(Episode episode, string tag, bool present, CancellationToken ct)
+    private async Task<bool> SetTagAsync(BaseItem item, string tag, bool present, CancellationToken ct)
     {
         var updated = present
-            ? ReleaseFinTag.Add(episode.Tags, tag)
-            : ReleaseFinTag.Remove(episode.Tags, tag);
-        if (ReferenceEquals(updated, episode.Tags) || updated.Length == episode.Tags.Length)
+            ? ReleaseFinTag.Add(item.Tags, tag)
+            : ReleaseFinTag.Remove(item.Tags, tag);
+        if (ReferenceEquals(updated, item.Tags) || updated.Length == item.Tags.Length)
         {
-            if (present == episode.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
+            if (present == item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase))
             {
                 return false; // already in desired state; skip a pointless metadata write
             }
         }
 
-        episode.Tags = updated;
+        item.Tags = updated;
         await libraryManager
-            .UpdateItemAsync(episode, episode.GetParent(), ItemUpdateType.MetadataEdit, ct)
+            .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, ct)
             .ConfigureAwait(false);
         return true;
     }
