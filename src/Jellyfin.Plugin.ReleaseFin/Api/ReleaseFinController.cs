@@ -92,11 +92,19 @@ public class ReleaseFinController(
 
         schedule.Id = Guid.NewGuid();
         schedule.LastRunUtc = DateTime.UtcNow;
-        await releaseManager.ApplyAsync(schedule, ct).ConfigureAwait(false);
+
+        // Register the schedule in config BEFORE tagging: a concurrent stray-tag cleanup
+        // must always see the id as live, or it would strip the tags being applied.
         lock (ConfigLock)
         {
             Config.Schedules = [.. Config.Schedules, schedule];
             Plugin.Instance!.SaveConfiguration();
+        }
+
+        await releaseManager.ApplyAsync(schedule, ct).ConfigureAwait(false);
+        lock (ConfigLock)
+        {
+            Plugin.Instance!.SaveConfiguration(); // persist the frontier ApplyAsync seeded
         }
 
         return Ok(ToDto(schedule));
@@ -119,14 +127,21 @@ public class ReleaseFinController(
 
         // Simplest correct semantics: tear down the old assignment, apply the new one.
         // Already-released episodes get re-locked if they're past the new offset — acceptable for edits.
-        await releaseManager.RemoveAsync(existing, ct).ConfigureAwait(false);
+        // The config entry is swapped FIRST (same id) so a concurrent stray-tag cleanup always
+        // sees the id as live throughout the remove/apply window.
         updated.Id = id;
         updated.LastRunUtc = DateTime.UtcNow;
-        await releaseManager.ApplyAsync(updated, ct).ConfigureAwait(false);
         lock (ConfigLock)
         {
             Config.Schedules = [.. Config.Schedules.Where(s => s.Id != id), updated];
             Plugin.Instance!.SaveConfiguration();
+        }
+
+        await releaseManager.RemoveAsync(existing, ct).ConfigureAwait(false);
+        await releaseManager.ApplyAsync(updated, ct).ConfigureAwait(false);
+        lock (ConfigLock)
+        {
+            Plugin.Instance!.SaveConfiguration(); // persist the frontier ApplyAsync seeded
         }
 
         return Ok(ToDto(updated));
@@ -173,10 +188,11 @@ public class ReleaseFinController(
     public async Task<ActionResult<ScheduleDto>> ReleaseUpTo(
         Guid id, [FromBody] ReleaseUpToRequest request, CancellationToken ct)
     {
-        if (request?.Season is not int season || season < 0
+        if (request?.Season is not int season || season < 1
             || request.Episode is not int episode || episode < 1)
         {
-            return BadRequest("Season must be 0 or greater and Episode must be 1 or greater.");
+            // Season 0 (specials) is never dripped, so a S00Exx target would silently no-op.
+            return BadRequest("Season and Episode must be 1 or greater (specials are not scheduled).");
         }
 
         var existing = Config.Schedules.FirstOrDefault(s => s.Id == id);

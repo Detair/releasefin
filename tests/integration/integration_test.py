@@ -356,15 +356,35 @@ def main():
     _, kuser = api("GET", f"/Users/{kid_id}", admin)
     check("kids policy still has the stray blocked tag",
           any(t.startswith("releasefin-") for t in kuser["Policy"]["BlockedTags"]))
+
+    # A LIVE schedule's tags and policy entries must survive the cleanup untouched.
+    status, live = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-live", "SeriesId": series_id, "UserIds": [kid_id],
+        "CronExpression": "0 3 29 2 *", "EpisodesPerTick": 1, "Enabled": True})
+    check("live schedule created before cleanup", status == 200, f"status={status}")
+    live_tag = f"releasefin-{live['Id'].replace('-', '').lower()}"
+
     status, result = api("POST", "/ReleaseFin/Maintenance/CleanStrayTags", admin)
     check("cleanup reports cleaned items and the kids user",
           status == 200 and result["ItemsCleaned"] >= 1 and result["UsersCleaned"] == 1,
           f"status={status} result={result}")
+    remaining = [t for e in episodes(admin, admin_id)
+                 for t in e.get("Tags", []) if t.startswith("releasefin-")]
+    check("only the live schedule's tags remain (all 8 episodes)",
+          len(remaining) == 8 and set(remaining) == {live_tag},
+          f"remaining={remaining}")
+    _, kuser = api("GET", f"/Users/{kid_id}", admin)
+    check("kids blocked tags keep only the live entry",
+          kuser["Policy"]["BlockedTags"] == [live_tag],
+          f"blocked={kuser['Policy']['BlockedTags']}")
+
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{live['Id']}", admin)
+    check("live schedule deleted after cleanup check", status == 204, f"status={status}")
     strays = [(e["IndexNumber"], t) for e in episodes(admin, admin_id)
               for t in e.get("Tags", []) if t.startswith("releasefin-")]
-    check("zero stray releasefin tags after cleanup", strays == [], f"strays={strays}")
+    check("zero releasefin tags after live delete", strays == [], f"strays={strays}")
     _, kuser = api("GET", f"/Users/{kid_id}", admin)
-    check("kids blocked tags empty after cleanup",
+    check("kids blocked tags empty after live delete",
           kuser["Policy"]["BlockedTags"] == [])
 
     # NoUsers: a schedule whose only assigned user was deleted gets flagged.
