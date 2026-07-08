@@ -8,6 +8,7 @@ regressions found during live verification (batch import locking, no stray tags
 after delete). stdlib only.
 """
 import datetime
+import http.server
 import json
 import os
 import pathlib
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -109,6 +111,33 @@ def rewind_last_run(hours):
     ctl("start", NAME)
     wait_server()
     return past
+
+
+HOOK_BODIES = []
+
+
+class HookHandler(http.server.BaseHTTPRequestHandler):
+    """Captures webhook POST bodies for scenario 7."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            HOOK_BODIES.append(json.loads(self.rfile.read(length)))
+        except ValueError:
+            HOOK_BODIES.append(None)
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_hook_listener():
+    """Background HTTP listener on an ephemeral port; the container reaches it
+    via rf-host.internal (--add-host=...:host-gateway in run.sh)."""
+    listener = http.server.HTTPServer(("0.0.0.0", 0), HookHandler)
+    threading.Thread(target=listener.serve_forever, daemon=True).start()
+    return listener, listener.server_address[1]
 
 
 def wait_tick_persisted(past):
@@ -237,6 +266,55 @@ def main():
     status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
     check("gated schedule delete accepted", status == 204, f"status={status}")
     wait_for("kids sees all 8 again", lambda: len(episodes(kid, kid_id)) == 8)
+
+    print("== scenario 7: notifications (webhook + activity log)")
+    listener, hook_port = start_hook_listener()
+    hook_url = f"http://rf-host.internal:{hook_port}/hook"
+    status, _ = api("PUT", "/ReleaseFin/Settings", admin, body={"WebhookUrl": "not a url"})
+    check("invalid webhook url rejected", status == 400, f"status={status}")
+    status, settings = api("PUT", "/ReleaseFin/Settings", admin,
+                           body={"WebhookUrl": hook_url})
+    check("webhook url saved",
+          status == 200 and settings["WebhookUrl"] == hook_url,
+          f"status={status} settings={settings}")
+    status, settings = api("GET", "/ReleaseFin/Settings", admin)
+    check("settings round-trip", status == 200 and settings["WebhookUrl"] == hook_url,
+          f"status={status} settings={settings}")
+
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-notify", "SeriesId": series_id, "UserIds": [kid_id],
+        "CronExpression": "0 16 * * *", "EpisodesPerTick": 1, "Enabled": True})
+    check("notify schedule created", status == 200 and sched["Released"] == 0,
+          f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+    status, sched = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseNow", admin)
+    check("release-now released E01", status == 200 and sched["Released"] == 1,
+          f"sched={sched}")
+
+    hook = wait_for("webhook delivery", lambda: next(iter(HOOK_BODIES), None), 30)
+    # the plugin serializes Guids dashed; the Jellyfin API returns them dash-less
+    hook_users = [u.replace("-", "").lower() for u in hook["users"]]
+    check("webhook body names S01E01 of the series",
+          hook["schedule"] == "it-notify" and "Test Show" in hook["series"]
+          and [(e["season"], e["episode"]) for e in hook["episodes"]] == [(1, 1)]
+          and kid_id.replace("-", "").lower() in hook_users,
+          f"hook={hook}")
+
+    def released_activity():
+        _, d = api("GET", "/System/ActivityLog/Entries?hasUserId=false", admin)
+        return [x for x in (d or {}).get("Items", [])
+                if x.get("Type") == "ReleaseFin.EpisodeReleased"]
+    entries = wait_for("activity log entry", released_activity, 30)
+    check("activity log entry names the release",
+          "S01E01" in entries[0]["Name"] and "it-notify" in entries[0]["Name"],
+          f"entry={entries[0]}")
+
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
+    check("notify schedule delete accepted", status == 204, f"status={status}")
+    status, settings = api("PUT", "/ReleaseFin/Settings", admin, body={"WebhookUrl": ""})
+    check("webhook url cleared", status == 200 and settings["WebhookUrl"] == "",
+          f"status={status} settings={settings}")
+    listener.shutdown()
 
     print("ALL SCENARIOS PASSED")
 

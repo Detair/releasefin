@@ -26,7 +26,10 @@ cp "$WORK/publish/Jellyfin.Plugin.ReleaseFin.dll" "$WORK/publish/Cronos.dll" \
    "$WORK/config/plugins/ReleaseFin/"
 
 echo "== start jellyfin ($TOOL, port $PORT)"
+# rf-host.internal lets the container reach a webhook listener on the host
+# (host-gateway works on docker 20.10+ and podman 4+).
 "$TOOL" run -d --name "$NAME" -p "$PORT:8096" \
+  --add-host=rf-host.internal:host-gateway \
   -v "$WORK/config:/config" -v "$WORK/media:/media" \
   docker.io/jellyfin/jellyfin:10.10.7 >/dev/null
 

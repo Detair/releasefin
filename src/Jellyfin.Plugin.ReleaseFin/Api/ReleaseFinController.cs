@@ -43,6 +43,11 @@ public class ScheduleDto
     public bool Orphaned { get; set; }
 }
 
+public class SettingsDto
+{
+    public string WebhookUrl { get; set; } = string.Empty;
+}
+
 [ApiController]
 [Authorize(Policy = Policies.RequiresElevation)]
 [Route("ReleaseFin")]
@@ -142,6 +147,31 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         }
 
         return Ok(ToDto(existing));
+    }
+
+    [HttpGet("Settings")]
+    public ActionResult<SettingsDto> GetSettings() =>
+        Ok(new SettingsDto { WebhookUrl = Config.WebhookUrl });
+
+    [HttpPut("Settings")]
+    public ActionResult<SettingsDto> UpdateSettings([FromBody] SettingsDto settings)
+    {
+        var webhookUrl = settings.WebhookUrl?.Trim() ?? string.Empty;
+        if (webhookUrl.Length > 0
+            && (!Uri.TryCreate(webhookUrl, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)))
+        {
+            return BadRequest("Webhook URL must be an absolute http(s) URL, or empty to disable.");
+        }
+
+        lock (ConfigLock)
+        {
+            // Merge only this field: schedules are owned by the schedule endpoints.
+            Config.WebhookUrl = webhookUrl;
+            Plugin.Instance!.SaveConfiguration();
+        }
+
+        return Ok(new SettingsDto { WebhookUrl = webhookUrl });
     }
 
     [HttpGet("CronPreview")]

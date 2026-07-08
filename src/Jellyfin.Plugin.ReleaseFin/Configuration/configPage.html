@@ -9,6 +9,24 @@
     <div data-role="content">
         <div class="content-primary">
             <h1>ReleaseFin — Episode Release Schedules</h1>
+
+            <form id="rfSettingsForm" style="margin-bottom:2em;">
+                <h2>Settings</h2>
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="rfWebhookUrl"
+                           label="Webhook URL (optional)"
+                           placeholder="https://example.com/hook"/>
+                    <div class="fieldDescription">
+                        A JSON payload (schedule, series, episodes, users) is POSTed here on every
+                        release. Leave empty to disable.
+                    </div>
+                </div>
+                <button is="emby-button" type="submit" class="raised button-submit">
+                    <span>Save settings</span>
+                </button>
+            </form>
+
+            <h2>Schedules</h2>
             <div id="rfScheduleList"></div>
             <br/>
             <button is="emby-button" type="button" id="rfNewSchedule" class="raised button-submit">
@@ -217,8 +235,29 @@
 
         function hideForm() { page.querySelector('#rfForm').style.display = 'none'; }
 
+        function loadSettings() {
+            ApiClient.ajax({ type: 'GET', url: url('Settings'), dataType: 'json' }).then(function (s) {
+                page.querySelector('#rfWebhookUrl').value = s.WebhookUrl || '';
+            });
+        }
+
         page.addEventListener('pageshow', function () {
+            loadSettings();
             loadPickers().then(loadList);
+        });
+
+        page.querySelector('#rfSettingsForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            ApiClient.ajax({
+                type: 'PUT',
+                url: url('Settings'),
+                data: JSON.stringify({ WebhookUrl: page.querySelector('#rfWebhookUrl').value.trim() }),
+                contentType: 'application/json'
+            }).then(function () { Dashboard.alert('Settings saved.'); })
+              .catch(function (xhr) {
+                  (xhr.text ? xhr.text() : Promise.resolve('Save failed.'))
+                      .then(function (t) { Dashboard.alert((t || '').replace(/^"|"$/g, '') || 'Save failed.'); });
+              });
         });
 
         page.querySelector('#rfPreset').addEventListener('change', syncPresetRows);

@@ -15,6 +15,7 @@ public class ReleaseManager(
     ILibraryManager libraryManager,
     IUserManager userManager,
     IUserDataManager userDataManager,
+    ReleaseNotifier notifier,
     ILogger<ReleaseManager> logger)
 {
     private readonly SemaphoreSlim _mutex = new(1, 1);
@@ -53,18 +54,20 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>Release the next N still-locked episodes in aired order. Returns how many were released.</summary>
+    /// <summary>Release the next N still-locked episodes in aired order. Returns how many were released.
+    /// This is the single choke point for every release path (scheduler ticks, catch-up, ReleaseNow),
+    /// so notifications fire here — after the semaphore is released, and never failing the release.</summary>
     public async Task<int> ReleaseNextAsync(ReleaseSchedule schedule, int count, CancellationToken ct)
     {
+        var released = new List<(int Season, int Episode, string Name)>();
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var tag = ReleaseFinTag.For(schedule.Id);
-            var released = 0;
 
             foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
             {
-                if (released >= count)
+                if (released.Count >= count)
                 {
                     break;
                 }
@@ -75,7 +78,7 @@ public class ReleaseManager(
                 }
 
                 await SetTagAsync(episode, tag, present: false, ct).ConfigureAwait(false);
-                released++;
+                released.Add((key.Season, key.Episode, episode.Name ?? string.Empty));
 
                 // Advance the persisted import-classification frontier past this episode.
                 var frontier = GetFrontier(schedule);
@@ -86,18 +89,26 @@ public class ReleaseManager(
                 }
             }
 
-            if (released > 0)
+            if (released.Count > 0)
             {
                 logger.LogInformation(
-                    "ReleaseFin: released {Count} episode(s) for schedule {Name}", released, schedule.Name);
+                    "ReleaseFin: released {Count} episode(s) for schedule {Name}", released.Count, schedule.Name);
             }
-
-            return released;
         }
         finally
         {
             _mutex.Release();
         }
+
+        if (released.Count > 0)
+        {
+            // Outside the semaphore: the notifier may do slow I/O (webhook) and must never
+            // block or fail library mutations. NotifyAsync swallows and logs all failures.
+            var seriesName = libraryManager.GetItemById(schedule.SeriesId)?.Name ?? "(unknown series)";
+            await notifier.NotifyAsync(schedule, seriesName, released, ct).ConfigureAwait(false);
+        }
+
+        return released.Count;
     }
 
     /// <summary>Scheduler entry point: releases as many episodes as the schedule's pacing mode
