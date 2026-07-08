@@ -1,3 +1,9 @@
+# jprm-style plugin build descriptor (not consumed by this repo's own CI/release
+# workflows, which drive off Jellyfin.Plugin.ReleaseFin.csproj + manifest.json instead).
+# Its schema only supports one framework/targetAbi pair, so this always describes the
+# net8.0/Jellyfin-10.10 build; the net9.0/Jellyfin-10.11 build is not representable here
+# — see .github/workflows/release.yml and scripts/update_manifest.py for the real,
+# dual-target release process.
 name: "ReleaseFin"
 guid: "e7d1f0a4-8c3b-4a5e-9f2d-6b0c4d8e1a23"
 version: "1.0.0.0"

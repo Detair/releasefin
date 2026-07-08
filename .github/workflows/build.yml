@@ -8,9 +8,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The plugin project targets net8.0 (Jellyfin 10.10) and net9.0 (Jellyfin 10.11).
+      # An SDK that doesn't recognize net9.0 can't even evaluate the project graph (fails
+      # with NETSDK1045), so both SDKs are installed even though the test project itself
+      # stays net8.0-only.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
       - run: dotnet build --nologo -warnaserror
       - run: dotnet test --nologo
 
@@ -20,8 +26,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
-      - name: Run integration suite against real Jellyfin
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: Run integration suite against Jellyfin 10.10 (net8.0)
         run: tests/integration/run.sh
         env:
           RF_CONTAINER_TOOL: docker
+
+      - name: Run integration suite against Jellyfin 10.11 (net9.0)
+        run: tests/integration/run.sh
+        env:
+          RF_CONTAINER_TOOL: docker
+          RF_PUBLISH_TFM: net9.0
+          RF_JELLYFIN_IMAGE: docker.io/jellyfin/jellyfin:10.11.11
+          RF_PORT: 8098
+          RF_CONTAINER_NAME: releasefin-it-10.11-${{ github.run_id }}

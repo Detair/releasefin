@@ -1,6 +1,12 @@
 using System.Text;
 using System.Text.Json;
+#if NET9_0
+// Jellyfin 10.11 (net9.0): entity types moved from Jellyfin.Data.Entities to
+// Jellyfin.Database.Implementations.Entities.
+using Jellyfin.Database.Implementations.Entities;
+#else
 using Jellyfin.Data.Entities;
+#endif
 using Jellyfin.Plugin.ReleaseFin.Configuration;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Model.Activity;

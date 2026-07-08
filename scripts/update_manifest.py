@@ -23,7 +23,7 @@ PLUGIN = {
     "category": "General",
     "imageUrl": "",
 }
-TARGET_ABI = "10.10.0.0"
+DEFAULT_TARGET_ABI = "10.10.0.0"
 
 
 def main() -> None:
@@ -33,6 +33,13 @@ def main() -> None:
     ap.add_argument("--url", required=True, help="public download URL of the zip")
     ap.add_argument("--changelog", default="")
     ap.add_argument("--manifest", default="manifest.json")
+    # Each server-compatible build (net8.0/10.10.x, net9.0/10.11.x, ...) is a distinct
+    # manifest entry. Jellyfin's own manifest schema keys a version entry on "version"
+    # alone, so two builds released together must carry different version strings even
+    # when they share the same feature release — see the ecosystem convention check
+    # below. --target-abi lets the release workflow record which server line a build
+    # targets without editing this script per Jellyfin release.
+    ap.add_argument("--target-abi", default=DEFAULT_TARGET_ABI)
     args = ap.parse_args()
 
     checksum = hashlib.md5(pathlib.Path(args.zip).read_bytes()).hexdigest()
@@ -48,11 +55,17 @@ def main() -> None:
         entry.clear()
         entry.update({**PLUGIN, "versions": versions})
 
-    entry["versions"] = [v for v in entry["versions"] if v["version"] != args.version]
+    # Key on (version, targetAbi): a release with builds for two server lines (e.g.
+    # 1.1.0.0/10.10.0.0 and 1.1.0.1/10.11.0.0) must not have one upsert evict the other's
+    # entry just because this script ran twice in the same release job.
+    entry["versions"] = [
+        v for v in entry["versions"]
+        if (v["version"], v["targetAbi"]) != (args.version, args.target_abi)
+    ]
     entry["versions"].insert(0, {
         "version": args.version,
         "changelog": args.changelog,
-        "targetAbi": TARGET_ABI,
+        "targetAbi": args.target_abi,
         "sourceUrl": args.url,
         "checksum": checksum,
         "timestamp": datetime.datetime.now(datetime.timezone.utc)
@@ -60,7 +73,7 @@ def main() -> None:
     })
 
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"manifest updated: {args.version} checksum={checksum}")
+    print(f"manifest updated: {args.version} targetAbi={args.target_abi} checksum={checksum}")
 
 
 if __name__ == "__main__":

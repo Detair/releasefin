@@ -1,6 +1,6 @@
 # releasefin
 
-ReleaseFin is a Jellyfin 10.10 plugin that drip-releases episodes of a series to selected accounts on a schedule, like weekly TV. You pick a series, the users it applies to, and a cadence (daily, weekly, or raw cron); unreleased episodes are hidden from those users until their release time passes. Example: your kids' account gets one episode of a show every day at 16:00 instead of the whole box set at once — everyone else on the server still sees everything.
+ReleaseFin is a Jellyfin plugin (10.10.x and 10.11.x) that drip-releases episodes of a series to selected accounts on a schedule, like weekly TV. You pick a series, the users it applies to, and a cadence (daily, weekly, or raw cron); unreleased episodes are hidden from those users until their release time passes. Example: your kids' account gets one episode of a show every day at 16:00 instead of the whole box set at once — everyone else on the server still sees everything.
 
 ## How hiding works
 
@@ -20,9 +20,9 @@ At each release time the scheduler removes the tag from the next episode(s) in a
 
 Updates show up in the catalog automatically.
 
-**Manually:** download the zip from the [latest release](https://github.com/Detair/releasefin/releases/latest) (or build with `dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -o publish`) and extract **both** `Jellyfin.Plugin.ReleaseFin.dll` and `Cronos.dll` into a `ReleaseFin` folder inside your Jellyfin plugin directory (e.g. `config/plugins/ReleaseFin/`). Cronos.dll is required — the plugin will not load without it. Restart Jellyfin.
+**Manually:** download the zip matching your server version from the [latest release](https://github.com/Detair/releasefin/releases/latest) (or build it yourself: `dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -f net8.0 -o publish` for Jellyfin 10.10.x, `-f net9.0` for 10.11.x) and extract **both** `Jellyfin.Plugin.ReleaseFin.dll` and `Cronos.dll` into a `ReleaseFin` folder inside your Jellyfin plugin directory (e.g. `config/plugins/ReleaseFin/`). Cronos.dll is required — the plugin will not load without it. Restart Jellyfin.
 
-Requires Jellyfin 10.10.x.
+Supports Jellyfin 10.10.x and 10.11.x, built and released as two separate DLLs (net8.0/targetAbi 10.10.0.0 and net9.0/targetAbi 10.11.0.0) listed as separate versions in the same manifest; installing via the plugin repository picks the right one automatically, same as any other multi-version Jellyfin plugin.
 
 ## Usage
 
@@ -76,4 +76,9 @@ The series was removed from the library. The schedule no longer does anything us
 dotnet build --nologo && dotnet test --nologo
 ```
 
-Pure decision logic (tag math, episode ordering, cron counting) lives in `src/Jellyfin.Plugin.ReleaseFin/Core/` and is unit-tested; the Jellyfin glue is verified against a real server using the manual checklist in [`dev/README.md`](dev/README.md) (dockerized Jellyfin 10.10.7).
+`dotnet build`/`dotnet publish` build both the net8.0 (Jellyfin 10.10) and net9.0 (Jellyfin
+10.11) targets; `dotnet publish` needs an explicit `-f net8.0`/`-f net9.0` once more than one
+target framework is present. See [`dev/README.md`](dev/README.md) for the toolchain note this
+requires (an SDK that recognizes net9.0, even for net8.0-only work).
+
+Pure decision logic (tag math, episode ordering, cron counting) lives in `src/Jellyfin.Plugin.ReleaseFin/Core/` and is unit-tested; the Jellyfin glue is verified against a real server using `tests/integration/run.sh` (dockerized Jellyfin, 10.10.7 by default, 10.11.11 also exercised in CI) and the manual checklist in [`dev/README.md`](dev/README.md).

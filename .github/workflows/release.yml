@@ -20,28 +20,56 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      # Jellyfin 10.10 (net8.0) and 10.11 (net9.0) builds are published side by side; see
+      # Jellyfin.Plugin.ReleaseFin.csproj for the TFM/targetAbi pairing. setup-dotnet
+      # installs both SDKs: the project's TargetFrameworks now include net9.0, so even a
+      # net8.0-only build/restore needs an SDK that recognizes net9.0 in the graph.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
 
       - name: Derive version from tag
         id: v
-        run: echo "version=${TAG#v}.0" >> "$GITHUB_OUTPUT"
-
-      - name: Build and package
-        env:
-          V: ${{ steps.v.outputs.version }}
         run: |
-          dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -o publish -p:Version="$V" --nologo
-          mkdir -p dist
-          (cd publish && zip "../dist/releasefin_${V}.zip" Jellyfin.Plugin.ReleaseFin.dll Cronos.dll)
+          echo "net8=${TAG#v}.0" >> "$GITHUB_OUTPUT"
+          echo "net9=${TAG#v}.1" >> "$GITHUB_OUTPUT"
 
-      - name: Update manifest
+      - name: Build and package (net8.0 / Jellyfin 10.10, targetAbi 10.10.0.0)
         env:
-          V: ${{ steps.v.outputs.version }}
+          V: ${{ steps.v.outputs.net8 }}
+        run: |
+          dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -f net8.0 -o publish-net8 -p:Version="$V" --nologo
+          mkdir -p dist
+          (cd publish-net8 && zip "../dist/releasefin_${V}.zip" Jellyfin.Plugin.ReleaseFin.dll Cronos.dll)
+
+      - name: Build and package (net9.0 / Jellyfin 10.11, targetAbi 10.11.0.0)
+        env:
+          V: ${{ steps.v.outputs.net9 }}
+        run: |
+          dotnet publish src/Jellyfin.Plugin.ReleaseFin -c Release -f net9.0 -o publish-net9 -p:Version="$V" --nologo
+          mkdir -p dist
+          (cd publish-net9 && zip "../dist/releasefin_${V}.zip" Jellyfin.Plugin.ReleaseFin.dll Cronos.dll)
+
+      - name: Update manifest (net8.0 entry)
+        env:
+          V: ${{ steps.v.outputs.net8 }}
         run: |
           python3 scripts/update_manifest.py \
             --version "$V" \
+            --target-abi "10.10.0.0" \
+            --zip "dist/releasefin_${V}.zip" \
+            --url "https://github.com/${REPO}/releases/download/${TAG}/releasefin_${V}.zip" \
+            --changelog "https://github.com/${REPO}/releases/tag/${TAG}"
+
+      - name: Update manifest (net9.0 entry)
+        env:
+          V: ${{ steps.v.outputs.net9 }}
+        run: |
+          python3 scripts/update_manifest.py \
+            --version "$V" \
+            --target-abi "10.11.0.0" \
             --zip "dist/releasefin_${V}.zip" \
             --url "https://github.com/${REPO}/releases/download/${TAG}/releasefin_${V}.zip" \
             --changelog "https://github.com/${REPO}/releases/tag/${TAG}"

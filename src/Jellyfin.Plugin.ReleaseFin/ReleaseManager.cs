@@ -1,4 +1,11 @@
-using Jellyfin.Data.Enums;
+using Jellyfin.Data.Enums; // BaseItemKind stays here in both versions.
+#if NET9_0
+// Jellyfin 10.11 (net9.0): PreferenceKind moved to Jellyfin.Database.Implementations.Enums, and
+// User.GetPreference/SetPreference became extension methods (Jellyfin.Data.UserEntityExtensions)
+// instead of instance members, so the Jellyfin.Data namespace itself must be in scope too.
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Enums;
+#endif
 using Jellyfin.Plugin.ReleaseFin.Configuration;
 using Jellyfin.Plugin.ReleaseFin.Core;
 using MediaBrowser.Controller.Entities;
@@ -214,7 +221,10 @@ public class ReleaseManager(
                 continue; // still locked
             }
 
-            if (users.Any(u => !userDataManager.GetUserData(u!, item).Played))
+            // Jellyfin 10.11's IUserDataManager.GetUserData is annotated nullable (never-played items
+            // return null there instead of a zeroed UserItemData); null-conditional access treats that
+            // the same as Played == false on both server versions.
+            if (users.Any(u => userDataManager.GetUserData(u!, item)?.Played != true))
             {
                 unplayed++;
             }
@@ -237,7 +247,7 @@ public class ReleaseManager(
                 await SetTagAsync(item, tag, present: false, ct).ConfigureAwait(false);
             }
 
-            var allUserIds = userManager.Users.Select(u => u.Id).ToArray();
+            var allUserIds = GetAllUsers().Select(u => u.Id).ToArray();
             await SetUserBlockAsync(allUserIds, tag, blocked: false).ConfigureAwait(false);
             logger.LogInformation("ReleaseFin: removed schedule {Name} ({Id})", schedule.Name, schedule.Id);
         }
@@ -283,7 +293,7 @@ public class ReleaseManager(
             }
 
             var usersCleaned = 0;
-            foreach (var user in userManager.Users.ToArray())
+            foreach (var user in GetAllUsers().ToArray())
             {
                 var current = user.GetPreference(PreferenceKind.BlockedTags) ?? [];
                 var kept = current.Where(t => !IsStray(t)).ToArray();
@@ -469,4 +479,12 @@ public class ReleaseManager(
             await userManager.UpdateUserAsync(user).ConfigureAwait(false);
         }
     }
+
+    /// <summary>All known users. Jellyfin 10.11 (net9.0) replaced the <c>IUserManager.Users</c>
+    /// property with a <c>GetUsers()</c> method; 10.10 (net8.0) only has the property.</summary>
+#if NET9_0
+    private IEnumerable<Jellyfin.Database.Implementations.Entities.User> GetAllUsers() => userManager.GetUsers();
+#else
+    private IEnumerable<Jellyfin.Data.Entities.User> GetAllUsers() => userManager.Users;
+#endif
 }
