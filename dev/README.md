@@ -36,16 +36,17 @@ against the net9.0/10.11 build instead:
    setup at http://localhost:8096 (create an admin and a "Kids" user).
 4. Restart the container after every plugin redeploy.
 
-## Verification checklist (manual; requires the environment above)
+## Verification
 
-1. Dashboard → Plugins → ReleaseFin: assign a daily schedule to a series for Kids with
-   offset S01E02 → as Kids (web + one other client), only S01E01–S01E02 visible; as
-   admin, everything visible with `releasefin-*` tags in the metadata editor.
-2. "Release now" → exactly one more episode appears for Kids.
-3. Stop the container, move `LastRunUtc` back 3 days in
-   `dev/config/plugins/configurations/Jellyfin.Plugin.ReleaseFin.xml` (or wait across
-   ticks), start → 3 episodes released on the startup catch-up tick.
-4. Add a new episode file to the scheduled series, run a library scan → it arrives
-   hidden for Kids.
-5. Delete the schedule → all episodes visible for Kids; no `releasefin-*` tags remain
-   on items; Kids' parental "block items with tags" list has no ReleaseFin entries.
+The manual checklist that used to live here is now automated: `tests/integration/run.sh`
+does everything above (schedule + offset visibility, release-now, downtime catch-up,
+locked imports, delete cleanup) plus every feature added since — pacing modes, webhook +
+activity-log notifications, release-up-to, stray-tag cleanup, the NO USERS flag, movie
+collections, and pause-at-season-end — as 10 scripted scenarios against a real container.
+Run it the same way described above (`RF_CONTAINER_TOOL=podman tests/integration/run.sh`,
+or set `RF_JELLYFIN_IMAGE`/`RF_PUBLISH_TFM` to test the net9.0/10.11 build instead). It
+takes several minutes and restarts the container a few times to exercise catch-up and
+season-pause; that's expected.
+
+Reach for manual testing in the dashboard only when you want to *see* the admin UI itself
+(the integration suite talks to the REST API directly, not the config page).

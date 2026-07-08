@@ -4,6 +4,8 @@ Target: everything below ships as **v1.1.0**. Items execute in order; each lands
 only after review and (where it touches runtime behavior) live verification against the
 dockerized Jellyfin.
 
+**Status: all six items shipped in v1.1.0.** See `CHANGELOG.md` for the release summary.
+
 ## 1. Automated integration tests in CI
 
 Turn the manual `dev/README.md` checklist into `tests/integration/run.sh` (+ helpers):
