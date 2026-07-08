@@ -318,6 +318,78 @@ def main():
           f"status={status} settings={settings}")
     listener.shutdown()
 
+    print("== scenario 8: release-up-to, stray-tag cleanup, no-users flag")
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-upto", "SeriesId": series_id, "UserIds": [kid_id],
+        # Feb 29 03:00 again: never fires; releases happen only via ReleaseUpTo.
+        "CronExpression": "0 3 29 2 *", "EpisodesPerTick": 1, "Enabled": True})
+    check("upto schedule created with 0 released",
+          status == 200 and sched["Released"] == 0, f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+    status, _ = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseUpTo", admin,
+                    body={"Season": -1, "Episode": 5})
+    check("negative season rejected", status == 400, f"status={status}")
+    status, _ = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseUpTo", admin,
+                    body={"Season": 1})
+    check("missing episode rejected", status == 400, f"status={status}")
+    status, sched = api("POST", f"/ReleaseFin/Schedules/{sched_id}/ReleaseUpTo", admin,
+                        body={"Season": 1, "Episode": 3})
+    check("release-up-to S01E03 returns 3/8",
+          status == 200 and sched["Released"] == 3, f"status={status} sched={sched}")
+    wait_for("kids sees exactly E01-E03",
+             lambda: [e["IndexNumber"] for e in episodes(kid, kid_id)] == [1, 2, 3])
+    tagged = sorted(e["IndexNumber"] for e in episodes(admin, admin_id)
+                    if any(t.startswith("releasefin-") for t in e.get("Tags", [])))
+    check("E04-E08 still tagged", tagged == [4, 5, 6, 7, 8], f"tagged={tagged}")
+
+    # Manufacture strays realistically: delete the schedule from the config on disk,
+    # leaving its item tags and the kids blocked-tag entry orphaned.
+    ctl("stop", NAME)
+    xml = PLUGIN_CONFIG.read_text()
+    xml, n = re.subn(r"<ReleaseSchedule>.*?</ReleaseSchedule>", "", xml, flags=re.S)
+    check("removed schedule element from plugin config", n == 1, f"replacements={n}")
+    PLUGIN_CONFIG.write_text(xml)
+    ctl("start", NAME)
+    wait_server()
+    _, scheds = api("GET", "/ReleaseFin/Schedules", admin)
+    check("schedule list empty after config surgery", scheds == [])
+    _, kuser = api("GET", f"/Users/{kid_id}", admin)
+    check("kids policy still has the stray blocked tag",
+          any(t.startswith("releasefin-") for t in kuser["Policy"]["BlockedTags"]))
+    status, result = api("POST", "/ReleaseFin/Maintenance/CleanStrayTags", admin)
+    check("cleanup reports cleaned items and the kids user",
+          status == 200 and result["ItemsCleaned"] >= 1 and result["UsersCleaned"] == 1,
+          f"status={status} result={result}")
+    strays = [(e["IndexNumber"], t) for e in episodes(admin, admin_id)
+              for t in e.get("Tags", []) if t.startswith("releasefin-")]
+    check("zero stray releasefin tags after cleanup", strays == [], f"strays={strays}")
+    _, kuser = api("GET", f"/Users/{kid_id}", admin)
+    check("kids blocked tags empty after cleanup",
+          kuser["Policy"]["BlockedTags"] == [])
+
+    # NoUsers: a schedule whose only assigned user was deleted gets flagged.
+    _, tmp_user = api("POST", "/Users/New", admin,
+                      body={"Name": "temp", "Password": "it-temp"})
+    tmp_id = tmp_user["Id"]
+    status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
+        "Name": "it-nousers", "SeriesId": series_id, "UserIds": [tmp_id],
+        "CronExpression": "0 3 29 2 *", "EpisodesPerTick": 1, "Enabled": True})
+    check("nousers schedule created without the flag",
+          status == 200 and sched["NoUsers"] is False, f"status={status} sched={sched}")
+    sched_id = sched["Id"]
+    status, _ = api("DELETE", f"/Users/{tmp_id}", admin)
+    check("temp user deleted", status == 204, f"status={status}")
+    _, scheds = api("GET", "/ReleaseFin/Schedules", admin)
+    check("schedule flagged NoUsers after user deletion",
+          len(scheds) == 1 and scheds[0]["Id"] == sched_id
+          and scheds[0]["NoUsers"] is True, f"scheds={scheds}")
+    status, _ = api("DELETE", f"/ReleaseFin/Schedules/{sched_id}", admin)
+    check("nousers schedule delete accepted", status == 204, f"status={status}")
+    strays = [(e["IndexNumber"], t) for e in episodes(admin, admin_id)
+              for t in e.get("Tags", []) if t.startswith("releasefin-")]
+    check("zero releasefin tags after nousers delete", strays == [], f"strays={strays}")
+    wait_for("kids sees all 8 at the end", lambda: len(episodes(kid, kid_id)) == 8)
+
     print("ALL SCENARIOS PASSED")
 
 

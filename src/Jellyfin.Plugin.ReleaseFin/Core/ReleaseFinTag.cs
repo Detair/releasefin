@@ -11,6 +11,19 @@ public static class ReleaseFinTag
     public static bool IsReleaseFinTag(string tag) =>
         tag.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Extracts the schedule id from a tag built by <see cref="For"/>
+    /// (releasefin-&lt;32 hex chars&gt;, case-insensitive). False for anything else.</summary>
+    public static bool TryGetScheduleId(string tag, out Guid scheduleId)
+    {
+        if (IsReleaseFinTag(tag) && Guid.TryParseExact(tag.AsSpan(Prefix.Length), "N", out scheduleId))
+        {
+            return true;
+        }
+
+        scheduleId = Guid.Empty;
+        return false;
+    }
+
     public static string[] Add(string[] tags, string tag) =>
         tags.Contains(tag, StringComparer.OrdinalIgnoreCase) ? tags : [.. tags, tag];
 

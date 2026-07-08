@@ -41,6 +41,9 @@ public class ScheduleDto
     public DateTime? NextRunUtc { get; set; }
 
     public bool Orphaned { get; set; }
+
+    /// <summary>True when none of the schedule's assigned users exist anymore.</summary>
+    public bool NoUsers { get; set; }
 }
 
 public class SettingsDto
@@ -48,11 +51,28 @@ public class SettingsDto
     public string WebhookUrl { get; set; } = string.Empty;
 }
 
+public class CleanStrayTagsResultDto
+{
+    public int ItemsCleaned { get; set; }
+
+    public int UsersCleaned { get; set; }
+}
+
+public class ReleaseUpToRequest
+{
+    public int? Season { get; set; }
+
+    public int? Episode { get; set; }
+}
+
 [ApiController]
 [Authorize(Policy = Policies.RequiresElevation)]
 [Route("ReleaseFin")]
 [Produces(MediaTypeNames.Application.Json)]
-public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager libraryManager)
+public class ReleaseFinController(
+    ReleaseManager releaseManager,
+    ILibraryManager libraryManager,
+    IUserManager userManager)
     : ControllerBase
 {
     private static readonly object ConfigLock = new();
@@ -147,6 +167,40 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
         }
 
         return Ok(ToDto(existing));
+    }
+
+    [HttpPost("Schedules/{id}/ReleaseUpTo")]
+    public async Task<ActionResult<ScheduleDto>> ReleaseUpTo(
+        Guid id, [FromBody] ReleaseUpToRequest request, CancellationToken ct)
+    {
+        if (request?.Season is not int season || season < 0
+            || request.Episode is not int episode || episode < 1)
+        {
+            return BadRequest("Season must be 0 or greater and Episode must be 1 or greater.");
+        }
+
+        var existing = Config.Schedules.FirstOrDefault(s => s.Id == id);
+        if (existing is null)
+        {
+            return NotFound();
+        }
+
+        await releaseManager
+            .ReleaseUpToAsync(existing, new EpisodeKey(season, episode), ct)
+            .ConfigureAwait(false);
+        lock (ConfigLock)
+        {
+            Plugin.Instance!.SaveConfiguration(); // persist the advanced release frontier
+        }
+
+        return Ok(ToDto(existing));
+    }
+
+    [HttpPost("Maintenance/CleanStrayTags")]
+    public async Task<ActionResult<CleanStrayTagsResultDto>> CleanStrayTags(CancellationToken ct)
+    {
+        var (items, users) = await releaseManager.CleanStrayTagsAsync(ct).ConfigureAwait(false);
+        return Ok(new CleanStrayTagsResultDto { ItemsCleaned = items, UsersCleaned = users });
     }
 
     [HttpGet("Settings")]
@@ -254,7 +308,8 @@ public class ReleaseFinController(ReleaseManager releaseManager, ILibraryManager
             NextRunUtc = ScheduleCalculator.IsValid(s.CronExpression)
                 ? ScheduleCalculator.NextOccurrenceUtc(s.CronExpression, DateTime.UtcNow, TimeZoneInfo.Local)
                 : null,
-            Orphaned = series is null
+            Orphaned = series is null,
+            NoUsers = !s.UserIds.Any(id => userManager.GetUserById(id) is not null)
         };
     }
 }

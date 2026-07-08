@@ -24,6 +24,13 @@
                 <button is="emby-button" type="submit" id="rfSaveSettings" class="raised button-submit">
                     <span>Save settings</span>
                 </button>
+                <button is="emby-button" type="button" id="rfCleanStray" class="raised">
+                    <span>Clean up stray tags</span>
+                </button>
+                <div class="fieldDescription">
+                    Removes releasefin tags that belong to no existing schedule from all episodes
+                    and user policies (e.g. leftovers from manual config edits or uninstalling).
+                </div>
             </form>
 
             <h2>Schedules</h2>
@@ -195,6 +202,7 @@
                     '<th>Next release</th><th>Status</th><th></th></tr></thead><tbody>' +
                     schedules.map(function (s) {
                         var status = s.Orphaned ? 'ORPHANED (series deleted)'
+                            : s.NoUsers ? 'NO USERS (all assigned users deleted)'
                             : !s.Enabled ? 'Disabled'
                             : s.Released >= s.Total ? 'Complete' : 'Active';
                         return '<tr><td>' + esc(s.Name) + '</td><td>' + esc(s.SeriesName) + '</td>' +
@@ -203,6 +211,7 @@
                             '<td>' + status + pacingLabel(s) + '</td>' +
                             '<td><button is="emby-button" type="button" class="raised rfEdit" data-id="' + s.Id + '">Edit</button> ' +
                             '<button is="emby-button" type="button" class="raised rfRelease" data-id="' + s.Id + '">Release now</button> ' +
+                            '<button is="emby-button" type="button" class="raised rfUpTo" data-id="' + s.Id + '">Release up to…</button> ' +
                             '<button is="emby-button" type="button" class="raised button-delete rfDelete" data-id="' + s.Id + '">Delete</button></td></tr>';
                     }).join('') + '</tbody></table>';
                 page.querySelector('#rfScheduleList').innerHTML = html;
@@ -265,6 +274,21 @@
               });
         });
 
+        page.querySelector('#rfCleanStray').addEventListener('click', function () {
+            Dashboard.showLoadingMsg();
+            ApiClient.ajax({ type: 'POST', url: url('Maintenance/CleanStrayTags'), dataType: 'json' })
+                .then(function (r) {
+                    Dashboard.hideLoadingMsg();
+                    Dashboard.alert('Removed stray tags from ' + r.ItemsCleaned + ' item(s) and '
+                        + r.UsersCleaned + ' user(s).');
+                    loadList();
+                })
+                .catch(function () {
+                    Dashboard.hideLoadingMsg();
+                    Dashboard.alert('Stray-tag cleanup failed.');
+                });
+        });
+
         page.querySelector('#rfPreset').addEventListener('change', syncPresetRows);
         page.querySelector('#rfPacing').addEventListener('change', syncPacingRow);
         page.querySelector('#rfTime').addEventListener('change', updatePreview);
@@ -281,6 +305,21 @@
                 showForm(page._schedules.find(function (s) { return s.Id === id; }));
             } else if (btn.classList.contains('rfRelease')) {
                 ApiClient.ajax({ type: 'POST', url: url('Schedules/' + id + '/ReleaseNow') }).then(loadList);
+            } else if (btn.classList.contains('rfUpTo')) {
+                var text = window.prompt('Release up to (e.g. S01E05):');
+                if (text === null) return;
+                var m = /^S(\d+)E(\d+)$/i.exec(text.trim());
+                if (!m) { Dashboard.alert('Target must look like S01E05'); return; }
+                ApiClient.ajax({
+                    type: 'POST',
+                    url: url('Schedules/' + id + '/ReleaseUpTo'),
+                    data: JSON.stringify({ Season: parseInt(m[1], 10), Episode: parseInt(m[2], 10) }),
+                    contentType: 'application/json'
+                }).then(loadList)
+                  .catch(function (xhr) {
+                      (xhr.text ? xhr.text() : Promise.resolve('Release failed.'))
+                          .then(function (t) { Dashboard.alert((t || '').replace(/^"|"$/g, '') || 'Release failed.'); });
+                  });
             } else if (btn.classList.contains('rfDelete')) {
                 if (window.confirm('Delete this schedule? All its episodes become visible again.')) {
                     ApiClient.ajax({ type: 'DELETE', url: url('Schedules/' + id) }).then(loadList);

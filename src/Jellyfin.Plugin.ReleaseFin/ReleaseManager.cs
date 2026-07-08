@@ -54,10 +54,21 @@ public class ReleaseManager(
         }
     }
 
-    /// <summary>Release the next N still-locked episodes in aired order. Returns how many were released.
-    /// This is the single choke point for every release path (scheduler ticks, catch-up, ReleaseNow),
-    /// so notifications fire here — after the semaphore is released, and never failing the release.</summary>
-    public async Task<int> ReleaseNextAsync(ReleaseSchedule schedule, int count, CancellationToken ct)
+    /// <summary>Release the next N still-locked episodes in aired order. Returns how many were released.</summary>
+    public Task<int> ReleaseNextAsync(ReleaseSchedule schedule, int count, CancellationToken ct) =>
+        ReleaseWhileAsync(schedule, (_, releasedSoFar) => releasedSoFar < count, ct);
+
+    /// <summary>One-off override: release every still-locked episode at or before the target
+    /// (aired order). Returns how many were released.</summary>
+    public Task<int> ReleaseUpToAsync(ReleaseSchedule schedule, EpisodeKey target, CancellationToken ct) =>
+        ReleaseWhileAsync(schedule, (key, _) => key.IsAtOrBefore(target), ct);
+
+    /// <summary>Releases still-locked episodes in aired order while the predicate (episode key,
+    /// count released so far) holds. This is the single choke point for every release path
+    /// (scheduler ticks, catch-up, ReleaseNow, ReleaseUpTo), so notifications fire here — after
+    /// the semaphore is released, once per batch, and never failing the release.</summary>
+    private async Task<int> ReleaseWhileAsync(
+        ReleaseSchedule schedule, Func<EpisodeKey, int, bool> keepReleasing, CancellationToken ct)
     {
         var released = new List<(int Season, int Episode, string Name)>();
         await _mutex.WaitAsync(ct).ConfigureAwait(false);
@@ -67,7 +78,7 @@ public class ReleaseManager(
 
             foreach (var (episode, key) in GetOrderedEpisodes(schedule.SeriesId))
             {
-                if (released.Count >= count)
+                if (!keepReleasing(key, released.Count))
                 {
                     break;
                 }
@@ -188,6 +199,67 @@ public class ReleaseManager(
             var allUserIds = userManager.Users.Select(u => u.Id).ToArray();
             await SetUserBlockAsync(allUserIds, tag, blocked: false).ConfigureAwait(false);
             logger.LogInformation("ReleaseFin: removed schedule {Name} ({Id})", schedule.Name, schedule.Id);
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    /// <summary>Maintenance sweep: removes every releasefin-* tag that belongs to no existing
+    /// schedule (including unparseable releasefin-* tags) from all episodes in the library and
+    /// from every user's blocked-tags preference. The documented uninstall story. SAFETY: only
+    /// releasefin-prefixed entries are ever considered; other tags are never touched.</summary>
+    public async Task<(int ItemsCleaned, int UsersCleaned)> CleanStrayTagsAsync(CancellationToken ct)
+    {
+        await _mutex.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var knownIds = Plugin.Instance!.Configuration.Schedules.Select(s => s.Id).ToHashSet();
+            bool IsStray(string tag) =>
+                ReleaseFinTag.IsReleaseFinTag(tag)
+                && (!ReleaseFinTag.TryGetScheduleId(tag, out var id) || !knownIds.Contains(id));
+
+            var itemsCleaned = 0;
+            var allEpisodes = libraryManager.GetItemList(new InternalItemsQuery
+            {
+                IncludeItemTypes = [BaseItemKind.Episode],
+                Recursive = true
+            });
+            foreach (var item in allEpisodes)
+            {
+                var kept = item.Tags.Where(t => !IsStray(t)).ToArray();
+                if (kept.Length == item.Tags.Length)
+                {
+                    continue;
+                }
+
+                item.Tags = kept;
+                await libraryManager
+                    .UpdateItemAsync(item, item.GetParent(), ItemUpdateType.MetadataEdit, ct)
+                    .ConfigureAwait(false);
+                itemsCleaned++;
+            }
+
+            var usersCleaned = 0;
+            foreach (var user in userManager.Users.ToArray())
+            {
+                var current = user.GetPreference(PreferenceKind.BlockedTags) ?? [];
+                var kept = current.Where(t => !IsStray(t)).ToArray();
+                if (kept.Length == current.Length)
+                {
+                    continue;
+                }
+
+                user.SetPreference(PreferenceKind.BlockedTags, kept);
+                await userManager.UpdateUserAsync(user).ConfigureAwait(false);
+                usersCleaned++;
+            }
+
+            logger.LogInformation(
+                "ReleaseFin: stray-tag cleanup touched {Items} item(s) and {Users} user(s)",
+                itemsCleaned, usersCleaned);
+            return (itemsCleaned, usersCleaned);
         }
         finally
         {
