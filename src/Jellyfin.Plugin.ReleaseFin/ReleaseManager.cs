@@ -103,9 +103,17 @@ public class ReleaseManager(
         if (released.Count > 0)
         {
             // Outside the semaphore: the notifier may do slow I/O (webhook) and must never
-            // block or fail library mutations. NotifyAsync swallows and logs all failures.
-            var seriesName = libraryManager.GetItemById(schedule.SeriesId)?.Name ?? "(unknown series)";
-            await notifier.NotifyAsync(schedule, seriesName, released, ct).ConfigureAwait(false);
+            // block or fail library mutations. Nothing after a successful release may throw —
+            // callers still need the return value to persist frontier/LastRunUtc state.
+            try
+            {
+                var seriesName = libraryManager.GetItemById(schedule.SeriesId)?.Name ?? "(unknown series)";
+                await notifier.NotifyAsync(schedule, seriesName, released, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "ReleaseFin: post-release notification failed for {Name}", schedule.Name);
+            }
         }
 
         return released.Count;

@@ -21,7 +21,7 @@
                         release. Leave empty to disable.
                     </div>
                 </div>
-                <button is="emby-button" type="submit" class="raised button-submit">
+                <button is="emby-button" type="submit" id="rfSaveSettings" class="raised button-submit">
                     <span>Save settings</span>
                 </button>
             </form>
@@ -236,8 +236,13 @@
         function hideForm() { page.querySelector('#rfForm').style.display = 'none'; }
 
         function loadSettings() {
+            var save = page.querySelector('#rfSaveSettings');
             ApiClient.ajax({ type: 'GET', url: url('Settings'), dataType: 'json' }).then(function (s) {
                 page.querySelector('#rfWebhookUrl').value = s.WebhookUrl || '';
+                save.disabled = false;
+            }).catch(function () {
+                // Don't let a failed load + save wipe a configured URL.
+                save.disabled = true;
             });
         }
 

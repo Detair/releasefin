@@ -283,7 +283,9 @@ def main():
 
     status, sched = api("POST", "/ReleaseFin/Schedules", admin, body={
         "Name": "it-notify", "SeriesId": series_id, "UserIds": [kid_id],
-        "CronExpression": "0 16 * * *", "EpisodesPerTick": 1, "Enabled": True})
+        # Feb 29 03:00 - effectively never fires during the test window; this
+        # scenario releases exclusively via ReleaseNow.
+        "CronExpression": "0 3 29 2 *", "EpisodesPerTick": 1, "Enabled": True})
     check("notify schedule created", status == 200 and sched["Released"] == 0,
           f"status={status} sched={sched}")
     sched_id = sched["Id"]
